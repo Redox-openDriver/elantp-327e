@@ -236,7 +236,7 @@ impl Gestures {
     }
 
     fn scroll(&self, (dx, dy): (f32, f32), events: &mut Vec<Event>) {
-        let sign = if self.settings.natural_scroll { 1.0 } else { -1.0 };
+        let sign = if self.settings.natural_scroll { -1.0 } else { 1.0 };
         if dx != 0.0 || dy != 0.0 {
             events.push(Event::Scroll { dx: sign * dx * self.settings.scroll_speed, dy: sign * dy * self.settings.scroll_speed });
         }
@@ -492,11 +492,11 @@ mod tests {
         let frames: Vec<(bool, Vec<Touch>)> = (0..=30).map(|i| (false, vec![touch(1, 40.0, 20.0 + i as f32), touch(2, 60.0, 20.0 + i as f32)])).collect();
         let events = run(&mut gestures(), &frames);
         assert_eq!(total(&events), (0.0, 0.0));
-        assert!((scrolled(&events).1 + 30.0 * DEFAULT.scroll_speed).abs() < 0.5, "{:?}", scrolled(&events));
+        assert!((scrolled(&events).1 - 30.0 * DEFAULT.scroll_speed).abs() < 0.5, "{:?}", scrolled(&events));
         let mut natural = DEFAULT;
         natural.natural_scroll = true;
         let flipped = scrolled(&run(&mut Gestures::new(natural, PAD), &frames)).1;
-        assert!((flipped - 30.0 * DEFAULT.scroll_speed).abs() < 0.5, "{flipped}");
+        assert!((flipped + 30.0 * DEFAULT.scroll_speed).abs() < 0.5, "{flipped}");
     }
 
     #[test]

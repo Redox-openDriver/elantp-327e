@@ -1,4 +1,4 @@
-dev-usage = usage: elantp-dev info | record <file> [seconds] | show <file> | gestures [--summary] <file> | live | session [--dir <directory>] [exercises…]
+dev-usage = usage: elantp-dev info | record <file> [seconds] | show <file> | gestures [--summary] <file> | live | drive [--natural] [--speed <factor>] | session [--dir <directory>] [exercises…]
 dev-error = error: { $detail }
 dev-not-found = touchpad { $device } not found among hidraw devices
 dev-found = touchpad: { $node } ({ $name })
@@ -95,3 +95,9 @@ session-thumb-hint = Hardly any time with two fingers; the thumb has to stay dow
 session-palm = Palm while typing
 session-palm-how = Type any text as usual, with your hands placed so the edge of a palm sometimes brushes the touchpad. What you type goes nowhere.
 session-palm-hint = The palm did not touch the pad; that is a useful recording too.
+dev-drive-start = the touchpad is driven by our driver (gestus); Ctrl+C gives it back to the system
+dev-drive-stop = the system touchpad driver works again
+dev-uinput-failed = could not create a virtual mouse: { $detail }
+dev-grab-failed = could not take the touchpad from the system driver: { $detail }
+dev-bad-speed = “{ $value }” is not a speed factor from 0.1 to 5
+dev-bad-option = unknown option: { $value }

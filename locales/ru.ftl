@@ -1,4 +1,4 @@
-dev-usage = использование: elantp-dev info | record <файл> [секунды] | show <файл> | gestures [--summary] <файл> | live | session [--dir <папка>] [упражнения…]
+dev-usage = использование: elantp-dev info | record <файл> [секунды] | show <файл> | gestures [--summary] <файл> | live | drive [--natural] [--speed <множитель>] | session [--dir <папка>] [упражнения…]
 dev-error = ошибка: { $detail }
 dev-not-found = тачпад { $device } среди устройств hidraw не найден
 dev-found = тачпад: { $node } ({ $name })
@@ -95,3 +95,9 @@ session-thumb-hint = Двух пальцев сразу почти не было
 session-palm = Ладонь при наборе текста
 session-palm-how = Печатай любой текст как обычно, положив руки так, чтобы край ладони иногда задевал тачпад. Напечатанное никуда не попадёт.
 session-palm-hint = Ладонь тачпад не задела — это тоже полезная запись.
+dev-drive-start = тачпадом управляет наш драйвер (gestus); Ctrl+C — вернуть системный
+dev-drive-stop = системный драйвер тачпада снова работает
+dev-uinput-failed = не получилось создать виртуальную мышь: { $detail }
+dev-grab-failed = не получилось отцепить тачпад от системного драйвера: { $detail }
+dev-bad-speed = «{ $value }» — не множитель скорости от 0.1 до 5
+dev-bad-option = неизвестный параметр: { $value }

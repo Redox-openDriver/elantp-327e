@@ -13,12 +13,13 @@ use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
-use elantp_linux::{evdev, recording};
+use elantp_linux::{evdev, recording, uinput};
 use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
 const POLL: Duration = Duration::from_millis(100);
+const SCROLL_PER_NOTCH: f32 = 30.0;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -602,6 +603,58 @@ fn run_session(catalog: &Catalog, dir: Option<PathBuf>, only: &[&str]) -> Result
     Ok(())
 }
 
+fn button_code(button: Button) -> u16 {
+    match button {
+        Button::Left => uinput::BTN_LEFT,
+        Button::Right => uinput::BTN_RIGHT,
+        Button::Middle => uinput::BTN_MIDDLE,
+    }
+}
+
+fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
+    let mut settings = gestus::DEFAULT;
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        match *option {
+            "--natural" => settings.natural_scroll = true,
+            "--speed" => {
+                let value = rest.next().copied().unwrap_or_default();
+                let factor: f32 = value.parse().ok().filter(|f: &f32| (0.1..=5.0).contains(f)).ok_or_else(|| Fail::new("dev-bad-speed").arg("value", value))?;
+                settings.speed *= factor;
+            }
+            other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
+        }
+    }
+    let found = found()?;
+    let layout = layout(&found.descriptor)?;
+    let device = open(&found)?;
+    let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
+    let mut pointer = uinput::Pointer::create("elantp gestus").map_err(|e| Fail::new("dev-uinput-failed").arg("detail", e))?;
+    let grab = evdev::grab(&nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
+    catch_interrupt();
+    println!("{}", catalog.text("dev-drive-start"));
+    let mut engine = Gestures::new(settings, surface(&layout));
+    let mut assembler = Assembler::default();
+    pump(&device, None, |micros, bytes| {
+        let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { return Ok(()) };
+        for event in engine.feed(&Input { time: micros, button: frame.button, touches: touches(&layout, &frame) }) {
+            match event {
+                Event::Motion { dx, dy } => pointer.motion(dx, dy)?,
+                Event::Press(button) => pointer.button(button_code(button), true)?,
+                Event::Release(button) => pointer.button(button_code(button), false)?,
+                Event::Scroll { dx, dy } => pointer.scroll(dx, dy, SCROLL_PER_NOTCH)?,
+                Event::Swipe { .. } => {}
+            }
+        }
+        Ok(())
+    })?;
+    release_interrupt();
+    drop(grab);
+    drop(pointer);
+    println!("{}", catalog.text("dev-drive-stop"));
+    Ok(())
+}
+
 fn live(catalog: &Catalog) -> Result<(), BoxError> {
     let found = found()?;
     let layout = layout(&found.descriptor)?;
@@ -636,6 +689,7 @@ fn main() -> ExitCode {
         ["gestures", file] => gestures(&catalog, Path::new(file), false),
         ["gestures", "--summary", file] => gestures(&catalog, Path::new(file), true),
         ["live"] => live(&catalog),
+        ["drive", options @ ..] => drive(&catalog, options),
         ["session", "--dir", dir, only @ ..] => run_session(&catalog, Some(PathBuf::from(dir)), only),
         ["session", only @ ..] => run_session(&catalog, None, only),
         _ => {
