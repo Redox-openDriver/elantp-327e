@@ -6,6 +6,7 @@ pub const HID_DSM_REVISION: u64 = 1;
 pub const HID_DSM_DESCRIPTOR_ADDRESS: u64 = 1;
 
 const END_TAG: u8 = 0x0f;
+const IRQ: u8 = 0x04;
 const MEMORY32_FIXED: u8 = 0x06;
 const EXTENDED_INTERRUPT: u8 = 0x09;
 const GPIO_CONNECTION: u8 = 0x0c;
@@ -102,11 +103,22 @@ pub fn resources(template: &[u8]) -> Result<Vec<Resource>, ResourceError> {
             if name == END_TAG {
                 return Ok(out);
             }
+            let body = template.get(at + 1..at + 1 + length).ok_or(ResourceError::Truncated(start))?;
             at += 1 + length;
-            if at > template.len() {
-                return Err(ResourceError::Truncated(start));
-            }
-            out.push(Resource::Other(name));
+            out.push(match (name, body) {
+                (IRQ, [low, high, rest @ ..]) => {
+                    let mask = u16::from_le_bytes([*low, *high]);
+                    let flags = rest.first().copied().unwrap_or(1);
+                    Resource::Interrupt {
+                        numbers: (0..16).filter(|bit| mask >> bit & 1 == 1).collect(),
+                        edge: flags & 1 == 1,
+                        active_low: flags >> 3 & 1 == 1,
+                        shared: flags >> 4 & 1 == 1,
+                    }
+                }
+                (IRQ, _) => return Err(ResourceError::BadLength(start)),
+                _ => Resource::Other(name),
+            });
             continue;
         }
         let length = usize::from(word(template, at + 1).ok_or(ResourceError::Truncated(start))?);
@@ -227,6 +239,55 @@ mod tests {
                 Resource::Interrupt { numbers: vec![10], edge: false, active_low: true, shared: false }
             ]
         );
+    }
+
+    #[test]
+    fn the_laptops_own_templates_give_the_touchpad_and_its_controllers() {
+        let touchpad = [
+            0x8e, 0x19, 0x00, 0x02, 0x00, 0x01, 0x02, 0x00, 0x00, 0x01, 0x06, 0x00, 0x80, 0x1a, 0x06, 0x00, 0x15, 0x00, 0x5c, 0x5f, 0x53, 0x42, 0x2e, 0x49,
+            0x32, 0x43, 0x41, 0x00, 0x8c, 0x20, 0x00, 0x01, 0x00, 0x01, 0x00, 0x12, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x19, 0x00, 0x23,
+            0x00, 0x00, 0x00, 0x09, 0x00, 0x5c, 0x5f, 0x53, 0x42, 0x2e, 0x47, 0x50, 0x49, 0x4f, 0x00, 0x79, 0x00,
+        ];
+        assert_eq!(
+            resources(&touchpad).unwrap(),
+            [
+                Resource::I2c { address: 0x15, speed: 400_000, ten_bit: false, controller: "\\_SB.I2CA".to_string() },
+                Resource::GpioInterrupt {
+                    pins: vec![9],
+                    edge: false,
+                    active_low: true,
+                    both: false,
+                    shared: false,
+                    debounce: 0,
+                    controller: "\\_SB.GPIO".to_string()
+                }
+            ]
+        );
+        let controller = [0x23, 0x00, 0x04, 0x21, 0x86, 0x09, 0x00, 0x01, 0x00, 0x20, 0xdc, 0xfe, 0x00, 0x10, 0x00, 0x00, 0x79, 0x00];
+        assert_eq!(
+            resources(&controller).unwrap(),
+            [
+                Resource::Interrupt { numbers: vec![10], edge: true, active_low: false, shared: false },
+                Resource::Memory { base: 0xfedc_2000, length: 0x1000, writable: true }
+            ]
+        );
+        let gpio = [
+            0x89, 0x06, 0x00, 0x0d, 0x01, 0x07, 0x00, 0x00, 0x00, 0x86, 0x09, 0x00, 0x01, 0x00, 0x15, 0xd8, 0xfe, 0x00, 0x04, 0x00, 0x00, 0x86, 0x09, 0x00,
+            0x01, 0x00, 0x12, 0xd8, 0xfe, 0x00, 0x01, 0x00, 0x00, 0x79, 0x00,
+        ];
+        assert_eq!(
+            resources(&gpio).unwrap(),
+            [
+                Resource::Interrupt { numbers: vec![7], edge: false, active_low: true, shared: true },
+                Resource::Memory { base: 0xfed8_1500, length: 0x400, writable: true },
+                Resource::Memory { base: 0xfed8_1200, length: 0x100, writable: true }
+            ]
+        );
+        assert_eq!(
+            resources(&[0x22, 0x00, 0x04, 0x79, 0x00]).unwrap(),
+            [Resource::Interrupt { numbers: vec![10], edge: true, active_low: false, shared: false }]
+        );
+        assert_eq!(resources(&[0x21, 0x00, 0x79, 0x00]), Err(ResourceError::BadLength(0)));
     }
 
     #[test]
