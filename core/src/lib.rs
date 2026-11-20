@@ -8,5 +8,6 @@ pub mod designware;
 pub mod hw;
 pub mod i2c;
 pub mod identity;
+pub mod pad;
 pub mod report;
 pub mod touchpad;
