@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use drv_i18n::{Catalog, Msg};
 
-const SOURCES: [&str; 5] = [
+const SOURCES: [&str; 6] = [
     include_str!("../src/bin/elantp-dev.rs"),
     include_str!("../src/lib.rs"),
     include_str!("../src/session.rs"),
+    include_str!("../src/config.rs"),
     include_str!("../../redox/src/lib.rs"),
     include_str!("../../redox/src/bin/elantpd.rs"),
 ];
@@ -14,7 +15,7 @@ fn used() -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     for source in SOURCES {
         for piece in source.split('"').skip(1).step_by(2) {
-            if (piece.starts_with("dev-") || piece.starts_with("session-") || piece.starts_with("redox-"))
+            if ["dev-", "session-", "redox-", "gesture-"].iter().any(|prefix| piece.starts_with(prefix))
                 && !piece.ends_with('-')
                 && piece.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
             {

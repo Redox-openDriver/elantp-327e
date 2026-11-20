@@ -11,15 +11,22 @@ use drv_i18n::{Catalog, Fail, Msg, as_msg};
 use elantp_core::identity::{self, Unverified};
 use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
+use elantp_linux::config::{self, Loaded};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
-use elantp_linux::{evdev, recording, uinput};
+use elantp_linux::{evdev, keys, recording, uinput};
 use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
 const POLL: Duration = Duration::from_millis(100);
+const RELOAD: Duration = Duration::from_secs(1);
 const SCROLL_PER_NOTCH: f32 = 30.0;
+const REPLAY_TAIL: u64 = 10_000_000;
+const TICK_LIMIT: usize = 1_000_000;
+const LEARN_TIMES: usize = 3;
+const MAX_LEARN_TIMES: usize = 10;
+const SHORTEST_STROKE: f32 = 8.0;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -265,39 +272,47 @@ struct Tally {
     travel: f32,
     scroll: (f32, f32),
     swipes: usize,
+    keys: usize,
+    notices: usize,
+    pens: usize,
 }
 
-fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError> {
-    let file = File::open(path).map_err(|e| Fail::new("dev-read-failed").arg("file", path.display()).arg("detail", e))?;
-    let recorded =
-        recording::read(&mut BufReader::new(file)).map_err(|e| Fail::new("dev-bad-recording").arg("file", path.display()).arg("detail", format!("{e:?}")))?;
-    let layout = layout(&recorded.descriptor)?;
-    let mut assembler = Assembler::default();
-    let mut engine = Gestures::new(gestus::DEFAULT, surface(&layout));
-    let mut tally = Tally::default();
-    let mut motion = (0.0f32, 0.0f32);
-    for (micros, bytes) in &recorded.reports {
-        let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { continue };
-        let events = engine.feed(&Input { time: *micros, button: frame.button, touches: touches(&layout, &frame) });
+struct Replay<'a> {
+    catalog: &'a Catalog,
+    quiet: bool,
+    tally: Tally,
+    motion: (f32, f32),
+}
+
+impl Replay<'_> {
+    fn flush_motion(&mut self) {
+        if !self.quiet && self.motion != (0.0, 0.0) {
+            let message = Msg::new("dev-gesture-motion").arg("dx", format!("{:.0}", self.motion.0)).arg("dy", format!("{:.0}", self.motion.1));
+            println!("{}", self.catalog.render(&message));
+        }
+        self.motion = (0.0, 0.0);
+    }
+
+    fn record(&mut self, engine: &Gestures, micros: u64, events: Vec<Event>) {
         for event in events {
             let line = match event {
                 Event::Motion { dx, dy } => {
-                    tally.travel += (dx * dx + dy * dy).sqrt();
-                    motion = (motion.0 + dx, motion.1 + dy);
+                    self.tally.travel += (dx * dx + dy * dy).sqrt();
+                    self.motion = (self.motion.0 + dx, self.motion.1 + dy);
                     None
                 }
                 Event::Press(button) => {
-                    tally.clicks[button as usize] += 1;
+                    self.tally.clicks[button as usize] += 1;
                     Some(Msg::new("dev-gesture-press").sub("button", button_key(button)))
                 }
                 Event::Release(button) => Some(Msg::new("dev-gesture-release").sub("button", button_key(button))),
                 Event::Scroll { dx, dy } => {
-                    tally.scroll = (tally.scroll.0 + dx, tally.scroll.1 + dy);
+                    self.tally.scroll = (self.tally.scroll.0 + dx, self.tally.scroll.1 + dy);
                     None
                 }
                 Event::Swipe { fingers, phase, dx, dy } => {
                     if phase == Phase::Begin {
-                        tally.swipes += 1;
+                        self.tally.swipes += 1;
                     }
                     (phase != Phase::Update).then(|| {
                         Msg::new("dev-gesture-swipe")
@@ -307,19 +322,74 @@ fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError>
                             .arg("dy", format!("{dy:.1}"))
                     })
                 }
-            };
-            if let Some(message) = line.filter(|_| !quiet) {
-                if motion != (0.0, 0.0) {
-                    println!("{}", catalog.render(&Msg::new("dev-gesture-motion").arg("dx", format!("{:.0}", motion.0)).arg("dy", format!("{:.0}", motion.1))));
-                    motion = (0.0, 0.0);
+                Event::Key { key, pressed } => {
+                    self.tally.keys += usize::from(pressed);
+                    pressed.then(|| Msg::new("dev-gesture-key").arg("key", key.name()))
                 }
-                println!("{}", catalog.render(&Msg::new("dev-gesture-at").arg("time", format!("{:.1}", *micros as f64 / 1000.0)).nest("event", message)));
+                Event::Pen { .. } => {
+                    self.tally.pens += 1;
+                    None
+                }
+                Event::PenAway => None,
+                Event::Notice(notice) => {
+                    self.tally.notices += 1;
+                    Some(elantp_linux::notice(engine, notice))
+                }
+            };
+            if let Some(message) = line.filter(|_| !self.quiet) {
+                self.flush_motion();
+                let at = Msg::new("dev-gesture-at").arg("time", format!("{:.1}", micros as f64 / 1000.0)).nest("event", message);
+                println!("{}", self.catalog.render(&at));
             }
         }
     }
-    if !quiet && motion != (0.0, 0.0) {
-        println!("{}", catalog.render(&Msg::new("dev-gesture-motion").arg("dx", format!("{:.0}", motion.0)).arg("dy", format!("{:.0}", motion.1))));
+}
+
+fn gestures(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
+    let (mut quiet, mut settings, mut recording) = (false, None, None);
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        match *option {
+            "--summary" => quiet = true,
+            "--config" => settings = Some(PathBuf::from(rest.next().copied().unwrap_or_default())),
+            other if !other.starts_with("--") && recording.is_none() => recording = Some(PathBuf::from(other)),
+            other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
+        }
     }
+    let Some(path) = recording else {
+        println!("{}", catalog.text("dev-usage"));
+        return Ok(());
+    };
+    let loaded = match settings {
+        Some(settings) => config::load(&settings)?,
+        None => Loaded::default(),
+    };
+    let file = File::open(&path).map_err(|e| Fail::new("dev-read-failed").arg("file", path.display()).arg("detail", e))?;
+    let recorded =
+        recording::read(&mut BufReader::new(file)).map_err(|e| Fail::new("dev-bad-recording").arg("file", path.display()).arg("detail", format!("{e:?}")))?;
+    let layout = layout(&recorded.descriptor)?;
+    let mut assembler = Assembler::default();
+    let mut engine = Gestures::with_symbols(loaded.config, surface(&layout), &loaded.symbols);
+    let mut replay = Replay { catalog, quiet, tally: Tally::default(), motion: (0.0, 0.0) };
+    let mut ticks = 0usize;
+    let mut catch_up = |engine: &mut Gestures, replay: &mut Replay, until: u64| {
+        while let Some(at) = engine.deadline().filter(|at| *at <= until && ticks < TICK_LIMIT) {
+            ticks += 1;
+            let events = engine.tick(at);
+            replay.record(engine, at, events);
+        }
+    };
+    let mut last = 0u64;
+    for (micros, bytes) in &recorded.reports {
+        catch_up(&mut engine, &mut replay, micros.saturating_sub(1));
+        last = *micros;
+        let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { continue };
+        let events = engine.feed(&Input { time: *micros, button: frame.button, touches: touches(&layout, &frame) });
+        replay.record(&engine, *micros, events);
+    }
+    catch_up(&mut engine, &mut replay, last.saturating_add(REPLAY_TAIL));
+    replay.flush_motion();
+    let tally = &replay.tally;
     println!(
         "{}",
         catalog.render(
@@ -333,6 +403,9 @@ fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError>
                 .num("swipes", tally.swipes)
         )
     );
+    if tally.keys + tally.notices + tally.pens > 0 {
+        println!("{}", catalog.render(&Msg::new("dev-gesture-extras").num("keys", tally.keys).num("notices", tally.notices).num("pens", tally.pens)));
+    }
     Ok(())
 }
 
@@ -611,47 +684,274 @@ fn button_code(button: Button) -> u16 {
     }
 }
 
+fn micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+struct Outputs {
+    pointer: uinput::Pointer,
+    keyboard: uinput::Keyboard,
+    pen: Option<uinput::Pen>,
+    pen_failed: bool,
+    surface: Surface,
+}
+
+impl Outputs {
+    fn create(surface: Surface) -> Result<Self, BoxError> {
+        let failed = |e: std::io::Error| Fail::new("dev-uinput-failed").arg("detail", e);
+        Ok(Outputs {
+            pointer: uinput::Pointer::create("elantp gestus").map_err(failed)?,
+            keyboard: uinput::Keyboard::create("elantp gestus keys", gestus::Key::ALL.iter().map(|key| keys::code(*key))).map_err(failed)?,
+            pen: None,
+            pen_failed: false,
+            surface,
+        })
+    }
+
+    fn pen(&mut self, catalog: &Catalog) -> Option<&mut uinput::Pen> {
+        if self.pen.is_none() && !self.pen_failed {
+            match uinput::Pen::create("elantp gestus pen", self.surface.width, self.surface.height) {
+                Ok(pen) => self.pen = Some(pen),
+                Err(e) => {
+                    self.pen_failed = true;
+                    eprintln!("{}", catalog.render(&Msg::new("dev-pen-failed").arg("detail", e)));
+                }
+            }
+        }
+        self.pen.as_mut()
+    }
+
+    fn deliver(&mut self, catalog: &Catalog, engine: &Gestures, events: Vec<Event>) -> Result<(), BoxError> {
+        for event in events {
+            match event {
+                Event::Motion { dx, dy } => self.pointer.motion(dx, dy)?,
+                Event::Press(button) => self.pointer.button(button_code(button), true)?,
+                Event::Release(button) => self.pointer.button(button_code(button), false)?,
+                Event::Scroll { dx, dy } => self.pointer.scroll(dx, dy, SCROLL_PER_NOTCH)?,
+                Event::Key { key, pressed } => self.keyboard.key(keys::code(key), pressed)?,
+                Event::Pen { x, y, down } => {
+                    if let Some(pen) = self.pen(catalog) {
+                        pen.place(x, y, down)?;
+                    }
+                }
+                Event::PenAway => {
+                    if let Some(pen) = self.pen.as_mut() {
+                        pen.away()?;
+                    }
+                }
+                Event::Notice(notice) => println!("{}", catalog.render(&elantp_linux::notice(engine, notice))),
+                Event::Swipe { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn let_go(&mut self) -> Result<(), BoxError> {
+        for button in [Button::Left, Button::Right, Button::Middle] {
+            self.pointer.button(button_code(button), false)?;
+        }
+        for key in keys::HELD {
+            self.keyboard.key(keys::code(key), false)?;
+        }
+        if let Some(pen) = self.pen.as_mut() {
+            pen.away()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Tweaks {
+    natural: bool,
+    speed: f32,
+}
+
+fn build(loaded: &Loaded, tweaks: Tweaks, surface: Surface) -> Gestures {
+    let mut settings = loaded.config.clone();
+    settings.pointer.natural_scroll |= tweaks.natural;
+    settings.pointer.speed *= tweaks.speed;
+    Gestures::with_symbols(settings, surface, &loaded.symbols)
+}
+
 fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
-    let mut settings = gestus::DEFAULT;
+    let mut tweaks = Tweaks { natural: false, speed: 1.0 };
+    let mut chosen: Option<PathBuf> = None;
     let mut rest = options.iter();
     while let Some(option) = rest.next() {
         match *option {
-            "--natural" => settings.natural_scroll = true,
+            "--natural" => tweaks.natural = true,
             "--speed" => {
                 let value = rest.next().copied().unwrap_or_default();
-                let factor: f32 = value.parse().ok().filter(|f: &f32| (0.1..=5.0).contains(f)).ok_or_else(|| Fail::new("dev-bad-speed").arg("value", value))?;
-                settings.speed *= factor;
+                tweaks.speed = value.parse().ok().filter(|f: &f32| (0.1..=5.0).contains(f)).ok_or_else(|| Fail::new("dev-bad-speed").arg("value", value))?;
             }
+            "--config" => chosen = Some(PathBuf::from(rest.next().copied().unwrap_or_default())),
             other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
         }
     }
+    let explicit = chosen.is_some();
+    let path = chosen.unwrap_or_else(|| PathBuf::from(config::SYSTEM));
+    let loaded = if explicit || path.exists() {
+        let loaded = config::load(&path)?;
+        println!("{}", catalog.render(&Msg::new("dev-config-used").arg("file", path.display())));
+        loaded
+    } else {
+        println!("{}", catalog.render(&Msg::new("dev-config-default").arg("file", path.display())));
+        Loaded::default()
+    };
+    let mut stamp = config::stamp(&path);
     let found = found()?;
     let layout = layout(&found.descriptor)?;
     let device = open(&found)?;
     let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
-    let mut pointer = uinput::Pointer::create("elantp gestus").map_err(|e| Fail::new("dev-uinput-failed").arg("detail", e))?;
+    let surface = surface(&layout);
+    let mut outputs = Outputs::create(surface)?;
     let grab = evdev::grab(&nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
     catch_interrupt();
     println!("{}", catalog.text("dev-drive-start"));
-    let mut engine = Gestures::new(settings, surface(&layout));
+    let mut engine = build(&loaded, tweaks, surface);
     let mut assembler = Assembler::default();
-    pump(&device, None, |micros, bytes| {
+    let mut buffer = vec![0u8; MAX_REPORT];
+    let started = Instant::now();
+    let mut checked = Instant::now();
+    while !STOP.load(Ordering::Relaxed) {
+        let wait = engine.deadline().map_or(POLL, |at| Duration::from_millis(at.saturating_sub(micros(started)).div_ceil(1000)).min(POLL));
+        if device.wait(wait)? {
+            while let Some(length) = device.read(&mut buffer)? {
+                if length == 0 {
+                    break;
+                }
+                let Some(frame) = layout.decode(&buffer[..length]).ok().and_then(|report| assembler.push(report)) else { continue };
+                let events = engine.feed(&Input { time: micros(started), button: frame.button, touches: touches(&layout, &frame) });
+                outputs.deliver(catalog, &engine, events)?;
+            }
+        }
+        let now = micros(started);
+        if engine.deadline().is_some_and(|at| at <= now) {
+            let events = engine.tick(now);
+            outputs.deliver(catalog, &engine, events)?;
+        }
+        if checked.elapsed() >= RELOAD {
+            checked = Instant::now();
+            let fresh = config::stamp(&path);
+            if fresh != stamp {
+                stamp = fresh;
+                let reloaded = if path.exists() { config::load(&path) } else { Ok(Loaded::default()) };
+                match reloaded {
+                    Ok(loaded) => {
+                        outputs.let_go()?;
+                        engine = build(&loaded, tweaks, surface);
+                        println!("{}", catalog.render(&Msg::new("dev-config-reloaded").arg("file", path.display())));
+                    }
+                    Err(e) => {
+                        eprintln!("{}", catalog.render(&as_msg(&e, "dev-error")));
+                        eprintln!("{}", catalog.text("dev-config-kept"));
+                    }
+                }
+            }
+        }
+    }
+    release_interrupt();
+    outputs.let_go()?;
+    drop(grab);
+    drop(outputs);
+    println!("{}", catalog.text("dev-drive-stop"));
+    Ok(())
+}
+
+fn learn(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
+    let (mut name, mut target, mut times) = (None, None, LEARN_TIMES);
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        match *option {
+            "--file" => target = Some(PathBuf::from(rest.next().copied().unwrap_or_default())),
+            "--times" => {
+                let value = rest.next().copied().unwrap_or_default();
+                times = value.parse().ok().filter(|n| (1..=MAX_LEARN_TIMES).contains(n)).ok_or_else(|| Fail::new("dev-learn-bad-times").arg("value", value))?;
+            }
+            other if !other.starts_with("--") && name.is_none() => name = Some(other.to_string()),
+            other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
+        }
+    }
+    let name = name.unwrap_or_default();
+    if !gestus::config::valid_name(&name) {
+        return Err(Fail::new("dev-learn-bad-name").arg("value", drv_i18n::printable(&name)).into());
+    }
+    let target = target.unwrap_or_else(|| config::symbols_beside(Path::new(config::SYSTEM)));
+    let found = found()?;
+    let layout = layout(&found.descriptor)?;
+    let device = open(&found)?;
+    let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
+    let grab = evdev::grab(&nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
+    catch_interrupt();
+    println!("{}", catalog.render(&Msg::new("dev-learn-start").arg("name", &name).num("times", times).arg("file", target.display())));
+    println!("{}", catalog.render(&Msg::new("dev-learn-draw").arg("name", &name).num("done", 0).num("times", times)));
+    let mut assembler = Assembler::default();
+    let mut samples: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut stroke: Vec<(f32, f32)> = Vec::new();
+    let mut most = 0usize;
+    pump(&device, None, |_, bytes| {
         let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { return Ok(()) };
-        for event in engine.feed(&Input { time: micros, button: frame.button, touches: touches(&layout, &frame) }) {
-            match event {
-                Event::Motion { dx, dy } => pointer.motion(dx, dy)?,
-                Event::Press(button) => pointer.button(button_code(button), true)?,
-                Event::Release(button) => pointer.button(button_code(button), false)?,
-                Event::Scroll { dx, dy } => pointer.scroll(dx, dy, SCROLL_PER_NOTCH)?,
-                Event::Swipe { .. } => {}
+        let fingers: Vec<Touch> = touches(&layout, &frame).into_iter().filter(|touch| !touch.palm).collect();
+        if let Some(first) = fingers.first() {
+            most = most.max(fingers.len());
+            stroke.push((first.x, first.y));
+            return Ok(());
+        }
+        if stroke.is_empty() {
+            return Ok(());
+        }
+        let finished = std::mem::take(&mut stroke);
+        let length: f32 = finished.windows(2).map(|pair| ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt()).sum();
+        if std::mem::take(&mut most) > 1 {
+            println!("{}", catalog.text("dev-learn-one-finger"));
+        } else if length < SHORTEST_STROKE {
+            println!("{}", catalog.text("dev-learn-short"));
+        } else if let Some(points) = gestus::normalize(&finished) {
+            samples.push(points);
+            if samples.len() >= times {
+                STOP.store(true, Ordering::Relaxed);
+            } else {
+                println!("{}", catalog.render(&Msg::new("dev-learn-draw").arg("name", &name).num("done", samples.len()).num("times", times)));
             }
         }
         Ok(())
     })?;
     release_interrupt();
     drop(grab);
-    drop(pointer);
-    println!("{}", catalog.text("dev-drive-stop"));
+    if samples.len() < times {
+        println!("{}", catalog.text("dev-learn-stopped"));
+        return Ok(());
+    }
+    let mut text = if target.exists() {
+        std::fs::read_to_string(&target).map_err(|e| Fail::new("dev-read-failed").arg("file", target.display()).arg("detail", e))?
+    } else {
+        String::new()
+    };
+    gestus::config::templates(&text).map_err(|problem| config::invalid(&target, problem))?;
+    for points in samples {
+        let template = gestus::Template { name: name.clone(), points };
+        if let Some(entry) = gestus::config::entry(&template) {
+            if !text.is_empty() && !text.ends_with("\n\n") {
+                text.push('\n');
+            }
+            text.push_str(&entry);
+        }
+    }
+    let written = |e: std::io::Error| Fail::new("dev-write-failed").arg("file", target.display()).arg("detail", e);
+    if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(written)?;
+    }
+    let draft = target.with_extension("toml.new");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(&draft)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(written)?;
+    std::fs::rename(&draft, &target).map_err(written)?;
+    println!("{}", catalog.render(&Msg::new("dev-learn-saved").arg("name", &name).num("count", times).arg("file", target.display())));
     Ok(())
 }
 
@@ -686,8 +986,8 @@ fn main() -> ExitCode {
             _ => Err(Fail::new("dev-bad-seconds").arg("value", seconds).into()),
         },
         ["show", file] => show(&catalog, Path::new(file)),
-        ["gestures", file] => gestures(&catalog, Path::new(file), false),
-        ["gestures", "--summary", file] => gestures(&catalog, Path::new(file), true),
+        ["gestures", options @ ..] => gestures(&catalog, options),
+        ["learn", options @ ..] => learn(&catalog, options),
         ["live"] => live(&catalog),
         ["drive", options @ ..] => drive(&catalog, options),
         ["session", "--dir", dir, only @ ..] => run_session(&catalog, Some(PathBuf::from(dir)), only),
