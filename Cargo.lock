@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "drv-i18n",
  "elantp-core",
+ "gestus",
  "libc",
 ]
 
@@ -69,6 +70,10 @@ dependencies = [
  "memchr",
  "thiserror",
 ]
+
+[[package]]
+name = "gestus"
+version = "0.1.0"
 
 [[package]]
 name = "intl-memoizer"

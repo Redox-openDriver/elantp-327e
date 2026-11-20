@@ -1,0 +1,9 @@
+[package]
+name = "gestus"
+version = "0.1.0"
+description = "Жесты тачпада без привязки к устройству и ОС: указатель с ускорением, тап, клик по числу пальцев, прокрутка, свайпы"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

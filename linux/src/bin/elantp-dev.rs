@@ -13,6 +13,7 @@ use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::recording;
+use gestus::{Button, Event, Gestures, Input, Phase, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -213,6 +214,110 @@ fn show(catalog: &Catalog, path: &Path) -> Result<(), BoxError> {
     Ok(())
 }
 
+fn touches(layout: &Layout, frame: &Frame) -> Vec<Touch> {
+    let millimetres =
+        |axis: &Axis, value: i64| ((value - axis.logical_min) as f64 * axis.micrometres as f64 / 1000.0 / (axis.logical_max - axis.logical_min) as f64) as f32;
+    frame
+        .contacts
+        .iter()
+        .filter(|contact| contact.tip)
+        .map(|contact| Touch { id: contact.id, x: millimetres(&layout.x, contact.x), y: millimetres(&layout.y, contact.y), palm: !contact.confident })
+        .collect()
+}
+
+fn button_key(button: Button) -> &'static str {
+    match button {
+        Button::Left => "dev-gesture-left",
+        Button::Right => "dev-gesture-right",
+        Button::Middle => "dev-gesture-middle",
+    }
+}
+
+fn phase_key(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Begin => "dev-gesture-begin",
+        Phase::Update => "dev-gesture-update",
+        Phase::End => "dev-gesture-end",
+    }
+}
+
+#[derive(Default)]
+struct Tally {
+    clicks: [usize; 3],
+    travel: f32,
+    scroll: (f32, f32),
+    swipes: usize,
+}
+
+fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError> {
+    let file = File::open(path).map_err(|e| Fail::new("dev-read-failed").arg("file", path.display()).arg("detail", e))?;
+    let recorded =
+        recording::read(&mut BufReader::new(file)).map_err(|e| Fail::new("dev-bad-recording").arg("file", path.display()).arg("detail", format!("{e:?}")))?;
+    let layout = layout(&recorded.descriptor)?;
+    let mut assembler = Assembler::default();
+    let mut engine = Gestures::new(gestus::DEFAULT);
+    let mut tally = Tally::default();
+    let mut motion = (0.0f32, 0.0f32);
+    for (micros, bytes) in &recorded.reports {
+        let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { continue };
+        let events = engine.feed(&Input { time: *micros, button: frame.button, touches: touches(&layout, &frame) });
+        for event in events {
+            let line = match event {
+                Event::Motion { dx, dy } => {
+                    tally.travel += (dx * dx + dy * dy).sqrt();
+                    motion = (motion.0 + dx, motion.1 + dy);
+                    None
+                }
+                Event::Press(button) => {
+                    tally.clicks[button as usize] += 1;
+                    Some(Msg::new("dev-gesture-press").sub("button", button_key(button)))
+                }
+                Event::Release(button) => Some(Msg::new("dev-gesture-release").sub("button", button_key(button))),
+                Event::Scroll { dx, dy } => {
+                    tally.scroll = (tally.scroll.0 + dx, tally.scroll.1 + dy);
+                    None
+                }
+                Event::Swipe { fingers, phase, dx, dy } => {
+                    if phase == Phase::Begin {
+                        tally.swipes += 1;
+                    }
+                    (phase != Phase::Update).then(|| {
+                        Msg::new("dev-gesture-swipe")
+                            .num("fingers", fingers)
+                            .sub("phase", phase_key(phase))
+                            .arg("dx", format!("{dx:.1}"))
+                            .arg("dy", format!("{dy:.1}"))
+                    })
+                }
+            };
+            if let Some(message) = line.filter(|_| !quiet) {
+                if motion != (0.0, 0.0) {
+                    println!("{}", catalog.render(&Msg::new("dev-gesture-motion").arg("dx", format!("{:.0}", motion.0)).arg("dy", format!("{:.0}", motion.1))));
+                    motion = (0.0, 0.0);
+                }
+                println!("{}", catalog.render(&Msg::new("dev-gesture-at").arg("time", format!("{:.1}", *micros as f64 / 1000.0)).nest("event", message)));
+            }
+        }
+    }
+    if !quiet && motion != (0.0, 0.0) {
+        println!("{}", catalog.render(&Msg::new("dev-gesture-motion").arg("dx", format!("{:.0}", motion.0)).arg("dy", format!("{:.0}", motion.1))));
+    }
+    println!(
+        "{}",
+        catalog.render(
+            &Msg::new("dev-gesture-summary")
+                .num("left", tally.clicks[Button::Left as usize])
+                .num("right", tally.clicks[Button::Right as usize])
+                .num("middle", tally.clicks[Button::Middle as usize])
+                .arg("travel", format!("{:.0}", tally.travel))
+                .arg("scroll-x", format!("{:.0}", tally.scroll.0))
+                .arg("scroll-y", format!("{:.0}", tally.scroll.1))
+                .num("swipes", tally.swipes)
+        )
+    );
+    Ok(())
+}
+
 fn live(catalog: &Catalog) -> Result<(), BoxError> {
     let found = found()?;
     let layout = layout(&found.descriptor)?;
@@ -243,6 +348,8 @@ fn main() -> ExitCode {
             _ => Err(Fail::new("dev-bad-seconds").arg("value", seconds).into()),
         },
         ["show", file] => show(&catalog, Path::new(file)),
+        ["gestures", file] => gestures(&catalog, Path::new(file), false),
+        ["gestures", "--summary", file] => gestures(&catalog, Path::new(file), true),
         ["live"] => live(&catalog),
         _ => {
             println!("{}", catalog.text("dev-usage"));
