@@ -14,7 +14,7 @@ use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
 use elantp_linux::{evdev, recording};
-use gestus::{Button, Event, Gestures, Input, Phase, Touch};
+use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -238,6 +238,10 @@ fn touches(layout: &Layout, frame: &Frame) -> Vec<Touch> {
         .collect()
 }
 
+fn surface(layout: &Layout) -> Surface {
+    Surface { width: layout.x.micrometres as f32 / 1000.0, height: layout.y.micrometres as f32 / 1000.0 }
+}
+
 fn button_key(button: Button) -> &'static str {
     match button {
         Button::Left => "dev-gesture-left",
@@ -268,7 +272,7 @@ fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError>
         recording::read(&mut BufReader::new(file)).map_err(|e| Fail::new("dev-bad-recording").arg("file", path.display()).arg("detail", format!("{e:?}")))?;
     let layout = layout(&recorded.descriptor)?;
     let mut assembler = Assembler::default();
-    let mut engine = Gestures::new(gestus::DEFAULT);
+    let mut engine = Gestures::new(gestus::DEFAULT, surface(&layout));
     let mut tally = Tally::default();
     let mut motion = (0.0f32, 0.0f32);
     for (micros, bytes) in &recorded.reports {
@@ -617,6 +621,7 @@ fn live(catalog: &Catalog) -> Result<(), BoxError> {
 }
 
 fn main() -> ExitCode {
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let catalog = elantp_linux::catalog();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
