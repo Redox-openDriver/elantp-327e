@@ -4,6 +4,7 @@ extern crate alloc;
 
 pub mod acpi;
 pub mod amdgpio;
+pub mod aml;
 pub mod designware;
 pub mod hw;
 pub mod i2c;

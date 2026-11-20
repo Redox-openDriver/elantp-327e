@@ -279,6 +279,16 @@ impl Layout {
         Some((report, payload))
     }
 
+    pub fn millimetres(&self, contact: &Contact) -> (f32, f32) {
+        let scale =
+            |axis: &Axis, value: i64| (value - axis.logical_min) as f32 * axis.micrometres as f32 / 1000.0 / (axis.logical_max - axis.logical_min) as f32;
+        (scale(&self.x, contact.x), scale(&self.y, contact.y))
+    }
+
+    pub fn size(&self) -> (f32, f32) {
+        (self.x.micrometres as f32 / 1000.0, self.y.micrometres as f32 / 1000.0)
+    }
+
     pub fn feature_length(&self, report: u8) -> Option<usize> {
         self.feature_lengths.iter().find(|(r, _)| *r == report).map(|(_, length)| *length)
     }
@@ -373,6 +383,16 @@ mod tests {
         assert!(layout.button.is_some() && layout.maximum.is_some() && layout.pad_type.is_some() && layout.latency.is_some());
         assert_eq!(layout.input_mode.map(|l| l.report), Some(0x03));
         assert_eq!(layout.surface_switch.map(|l| l.report), Some(0x05));
+    }
+
+    #[test]
+    fn contacts_are_placed_in_millimetres_on_the_pad() {
+        let layout = layout();
+        let corner = Contact { id: 0, x: 3679, y: 2261, tip: true, confident: true };
+        let (x, y) = layout.millimetres(&corner);
+        assert!((x - 117.0).abs() < 1e-3 && (y - 72.0).abs() < 1e-3, "{x} {y}");
+        assert_eq!(layout.millimetres(&Contact { x: 0, y: 0, ..corner }), (0.0, 0.0));
+        assert_eq!(layout.size(), (117.0, 72.0));
     }
 
     #[test]
