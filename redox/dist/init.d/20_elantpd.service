@@ -1,0 +1,9 @@
+[unit]
+description = "ELAN 04F3:327E touchpad"
+requires_weak = [
+    "00_base.target",
+]
+
+[service]
+cmd = "elantpd"
+type = "oneshot_async"

@@ -1,0 +1,14 @@
+[package]
+description = "Open-source driver for the ELAN 04F3:327E touchpad (I2C HID Precision Touchpad)"
+
+[source]
+git = "https://github.com/Redox-openDriver/elantp-327e"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+COOKBOOK_CARGO_PATH=redox cookbook_cargo
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cp -v "${COOKBOOK_SOURCE}/redox/dist/init.d/20_elantpd.service" "${COOKBOOK_STAGE}/usr/lib/init.d/20_elantpd.service"
+"""

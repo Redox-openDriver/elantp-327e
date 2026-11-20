@@ -1,0 +1,43 @@
+# elantp-327e — открытый драйвер тачпада ELAN 04F3:327E
+
+An open driver for the ELAN 04F3:327E touchpad (an I2C HID Windows Precision Touchpad) aimed at Redox OS, developed and
+tested on Linux first: report parsing, contact assembly, its own gesture engine (pointer acceleration, taps, clicks by
+finger count, two-finger scrolling, swipes, thumb and palm rejection tuned on real recordings), and on Redox a
+DesignWare I2C master, AMD GPIO interrupts and HID over I2C feeding `inputd`. It runs only with the exact pad it was
+verified on. The documentation below is in Russian.
+
+Тачпад ноутбука Lenovo ThinkBook 16 G6 ABP (21KK): ELAN06FA, HID 04F3:327E на шине I2C, стандартный Windows Precision
+Touchpad (пять касаний, площадка-кнопка 117 × 72 мм). Реверс не понадобился: HID over I2C и Precision Touchpad описаны
+открыто.
+
+> Независимый открытый проект. Не связан с ELAN Microelectronics; название ELAN указано только для обозначения совместимого устройства.
+
+## Что готово
+| часть | состояние |
+|---|---|
+| `core` | разбор дескрипторов HID, раскладка Precision Touchpad, сборка касаний, команды HID over I2C, ресурсы ACPI, контроллер I2C DesignWare, прерывания GPIO AMD, запуск тачпада — без привязки к ОС, `no_std` |
+| `gestus` | жесты: указатель с ускорением, тапы одним, двумя и тремя пальцами, клик по числу пальцев, прокрутка двумя, свайпы тремя и четырьмя, лежащий большой палец, ладонь у краёв; пороги сняты с записанных касаний |
+| `linux` | `elantp-dev`: сведения о тачпаде, пошаговая запись касаний с заданиями (`session`), разбор записей, жесты вживую вместо системного драйвера (`drive`) |
+| `redox` | служба `elantpd`: ресурсы из ACPI через `acpid`, регистры контроллеров, прерывание, события в `inputd`; собрана, но на ноутбуке ещё не проверена |
+
+## Попробовать на Linux
+```sh
+cargo build --release
+sudo target/release/elantp-dev drive
+```
+Пока команда работает, курсором управляют жесты этого драйвера, а не системный драйвер; Ctrl+C всё возвращает.
+`--natural` — естественная прокрутка, `--speed 0.7` — медленнее. `sudo target/release/elantp-dev session` — записать свои
+касания с подсказками (тачпад на время записи не двигает курсор).
+
+## Устройство
+Тачпад отвечает на адресе 0x15 шины `\_SB.I2CA` (контроллер DesignWare AMDI0010, 400 кГц, тактовая частота 150 МГц),
+о новых касаниях сообщает выводом 9 контроллера GPIO AMD (AMDI0030, общее прерывание 7). Драйвер работает только с
+проверенным вариантом: HID 04F3:327E с дескриптором отчётов из 675 байт; другие тачпады этой модели ноутбука (Synaptics,
+FocalTech, Goodix, Cirque) он не трогает. Служебные отчёты тачпада для обновления прошивки драйвер построить не может.
+
+## Лицензия
+
+[GNU AGPL-3.0-or-later](LICENSE), © 2026 AristarkhKenebas.
+
+Код написан с помощью ИИ-ассистента под руководством автора, поэтому в upstream Redox OS не отправляется: Redox не
+принимает код, созданный языковыми моделями.

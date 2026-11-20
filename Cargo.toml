@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["core", "gestus", "linux"]
+exclude = ["redox"]
 
 [workspace.package]
 edition = "2024"
