@@ -1,8 +1,8 @@
 use std::fs::File;
-use std::io::{BufReader, BufWriter, ErrorKind, Write};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -12,7 +12,8 @@ use elantp_core::identity::{self, Unverified};
 use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
-use elantp_linux::recording;
+use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
+use elantp_linux::{evdev, recording};
 use gestus::{Button, Event, Gestures, Input, Phase, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
@@ -30,6 +31,13 @@ fn catch_interrupt() {
     unsafe {
         libc::signal(libc::SIGINT, handler as libc::sighandler_t);
         libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+    }
+}
+
+fn release_interrupt() {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
     }
 }
 
@@ -62,6 +70,11 @@ fn open(found: &Found) -> Result<Device, BoxError> {
         let fail = if e.kind() == ErrorKind::PermissionDenied { Fail::new("dev-needs-root") } else { Fail::new("dev-open-failed").arg("detail", e) };
         fail.arg("node", found.node.display()).into()
     })
+}
+
+fn hand_over_path(path: &Path) -> Result<(), BoxError> {
+    let handle = File::open(path)?;
+    hand_over(&handle)
 }
 
 fn hand_over(file: &File) -> Result<(), BoxError> {
@@ -318,6 +331,273 @@ fn gestures(catalog: &Catalog, path: &Path, quiet: bool) -> Result<(), BoxError>
     Ok(())
 }
 
+struct Quiet {
+    saved: Option<libc::termios>,
+}
+
+impl Quiet {
+    fn new() -> Self {
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut saved) } != 0 {
+            return Quiet { saved: None };
+        }
+        let mut quiet = saved;
+        quiet.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &quiet) };
+        Quiet { saved: Some(saved) }
+    }
+}
+
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        if let Some(saved) = self.saved {
+            unsafe {
+                libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &saved);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Go,
+    Skip,
+    Quit,
+}
+
+fn ask(catalog: &Catalog, key: &str) -> Answer {
+    unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
+    print!("{} ", catalog.text(key));
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+        return Answer::Quit;
+    }
+    match line.trim() {
+        "n" | "N" | "т" | "Т" => Answer::Skip,
+        "q" | "Q" | "й" | "Й" => Answer::Quit,
+        _ => Answer::Go,
+    }
+}
+
+fn stamp() -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!("{:04}-{:02}-{:02}-{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
+fn make_dir(path: &Path) -> Result<(), BoxError> {
+    let mut built = PathBuf::new();
+    for part in path.components() {
+        built.push(part);
+        if !built.exists() {
+            std::fs::create_dir(&built).map_err(|e| Fail::new("dev-write-failed").arg("file", built.display()).arg("detail", e))?;
+            hand_over_path(&built)?;
+        }
+    }
+    Ok(())
+}
+
+fn points(layout: &Layout, frame: &Frame) -> Vec<Point> {
+    touches(layout, frame).into_iter().map(|t| Point { id: t.id, x: t.x, y: t.y, palm: t.palm }).collect()
+}
+
+struct Screen {
+    lines: usize,
+    enabled: bool,
+}
+
+impl Screen {
+    fn show(&mut self, lines: &[String]) {
+        if !self.enabled {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        if self.lines > 0 {
+            let _ = write!(out, "\x1b[{}A", self.lines);
+        }
+        for line in lines {
+            let _ = writeln!(out, "\x1b[2K{line}");
+        }
+        let _ = out.flush();
+        self.lines = lines.len();
+    }
+}
+
+struct Pad<'a> {
+    layout: &'a Layout,
+    descriptor: &'a [u8],
+    device: &'a Device,
+    nodes: &'a [PathBuf],
+}
+
+fn exercise(catalog: &Catalog, pad: &Pad, path: &Path, scenario: &Scenario) -> Result<(Stats, bool), BoxError> {
+    let Pad { layout, descriptor, device, nodes } = *pad;
+    let grab = match evdev::grab(nodes) {
+        Ok(grab) => Some(grab),
+        Err(e) => {
+            println!("{}", catalog.render(&Msg::new("session-grab-failed").arg("detail", e)));
+            None
+        }
+    };
+    let quiet = Quiet::new();
+    STOP.store(false, Ordering::Relaxed);
+    catch_interrupt();
+    for left in (1..=3u64).rev() {
+        if STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        print!("{} ", catalog.render(&Msg::new("session-countdown").num("seconds", left)));
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    println!("{}", catalog.text("session-go"));
+    let mut buffer = vec![0u8; MAX_REPORT];
+    while let Some(length) = device.read(&mut buffer)? {
+        if length == 0 {
+            break;
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| Fail::new("dev-write-failed").arg("file", path.display()).arg("detail", e))?;
+    hand_over(&file)?;
+    let mut out = BufWriter::new(file);
+    recording::header(&mut out, descriptor)?;
+    let size = (layout.x.micrometres as f32 / 1000.0, layout.y.micrometres as f32 / 1000.0);
+    let mut screen = Screen { lines: 0, enabled: unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 };
+    let mut assembler = Assembler::default();
+    let mut stats = Stats::default();
+    let (mut current, mut button) = (Vec::new(), false);
+    let limit = Duration::from_secs(scenario.seconds);
+    let start = Instant::now();
+    let mut drawn = start - Duration::from_secs(1);
+    while !STOP.load(Ordering::Relaxed) && start.elapsed() < limit {
+        if device.wait(Duration::from_millis(50))? {
+            while let Some(length) = device.read(&mut buffer)? {
+                if length == 0 {
+                    break;
+                }
+                let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                recording::report(&mut out, micros, &buffer[..length])?;
+                if let Some(frame) = layout.decode(&buffer[..length]).ok().and_then(|report| assembler.push(report)) {
+                    current = points(layout, &frame);
+                    button = frame.button;
+                    stats.add(micros, button, &current);
+                }
+            }
+        }
+        if drawn.elapsed() >= Duration::from_millis(100) {
+            drawn = Instant::now();
+            let left = limit.saturating_sub(start.elapsed()).as_secs() + 1;
+            let fingers = current.iter().filter(|p| !p.palm).count();
+            let mut lines = vec![catalog.render(&Msg::new("session-recording").num("seconds", left).num("fingers", fingers))];
+            lines.extend(session::draw(44, 11, size, &current, button));
+            screen.show(&lines);
+        }
+    }
+    out.flush()?;
+    let interrupted = STOP.load(Ordering::Relaxed);
+    release_interrupt();
+    drop(quiet);
+    drop(grab);
+    Ok((stats, interrupted))
+}
+
+fn run_session(catalog: &Catalog, dir: Option<PathBuf>, only: &[&str]) -> Result<(), BoxError> {
+    let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
+    if let Some(unknown) = only.iter().find(|name| !names.contains(name)) {
+        return Err(Fail::new("session-unknown").arg("name", unknown).arg("names", names.join(", ")).into());
+    }
+    let chosen: Vec<&Scenario> = SCENARIOS.iter().filter(|s| only.is_empty() || only.contains(&s.name)).collect();
+    let found = found()?;
+    let layout = layout(&found.descriptor)?;
+    let device = open(&found)?;
+    let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
+    let dir = dir.unwrap_or_else(|| Path::new("captures/touchpad").join(stamp()));
+    println!("{}", catalog.render(&Msg::new("session-intro").num("count", chosen.len())));
+    println!("{}", catalog.text("session-intro-grab"));
+    println!("{}", catalog.text("session-intro-keys"));
+    if ask(catalog, "session-start") == Answer::Quit {
+        return Ok(());
+    }
+    make_dir(&dir)?;
+    let mut done: Vec<(&str, bool)> = Vec::new();
+    'steps: for (number, scenario) in chosen.iter().enumerate() {
+        loop {
+            println!();
+            println!(
+                "{}",
+                catalog.render(
+                    &Msg::new("session-step")
+                        .num("number", number + 1)
+                        .num("count", chosen.len())
+                        .sub("title", scenario.title)
+                        .num("seconds", scenario.seconds)
+                )
+            );
+            println!("{}", catalog.text(scenario.how));
+            match ask(catalog, "session-ask") {
+                Answer::Skip => continue 'steps,
+                Answer::Quit => break 'steps,
+                Answer::Go => {}
+            }
+            let path = dir.join(format!("{}.tprec", scenario.name));
+            let pad = Pad { layout: &layout, descriptor: &found.descriptor, device: &device, nodes: &nodes };
+            let (stats, interrupted) = exercise(catalog, &pad, &path, scenario)?;
+            println!(
+                "{}",
+                catalog.render(
+                    &Msg::new("session-result")
+                        .num("frames", stats.frames)
+                        .num("most", stats.most)
+                        .num("taps", stats.taps)
+                        .num("multi", stats.multi_taps)
+                        .num("presses", stats.presses)
+                )
+            );
+            let good = stats.done(scenario.expect);
+            if interrupted {
+                println!("{}", catalog.text("session-interrupted"));
+                done.push((scenario.name, good));
+                break 'steps;
+            }
+            if good {
+                done.push((scenario.name, true));
+                continue 'steps;
+            }
+            println!("{}", catalog.text(scenario.hint));
+            match ask(catalog, "session-again") {
+                Answer::Go => continue,
+                Answer::Skip => {
+                    done.push((scenario.name, false));
+                    continue 'steps;
+                }
+                Answer::Quit => {
+                    done.push((scenario.name, false));
+                    break 'steps;
+                }
+            }
+        }
+    }
+    println!();
+    for (name, good) in &done {
+        println!(
+            "{}",
+            catalog.render(&Msg::new("session-summary-line").arg("name", name).sub("state", if *good { "session-state-good" } else { "session-state-weak" }))
+        );
+    }
+    println!("{}", catalog.render(&Msg::new("session-saved").arg("dir", dir.display())));
+    println!("{}", catalog.text("session-next"));
+    Ok(())
+}
+
 fn live(catalog: &Catalog) -> Result<(), BoxError> {
     let found = found()?;
     let layout = layout(&found.descriptor)?;
@@ -351,6 +631,8 @@ fn main() -> ExitCode {
         ["gestures", file] => gestures(&catalog, Path::new(file), false),
         ["gestures", "--summary", file] => gestures(&catalog, Path::new(file), true),
         ["live"] => live(&catalog),
+        ["session", "--dir", dir, only @ ..] => run_session(&catalog, Some(PathBuf::from(dir)), only),
+        ["session", only @ ..] => run_session(&catalog, None, only),
         _ => {
             println!("{}", catalog.text("dev-usage"));
             return ExitCode::from(2);
