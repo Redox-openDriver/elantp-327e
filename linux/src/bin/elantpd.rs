@@ -12,6 +12,7 @@ use elantp_linux::config::{self, Loaded};
 use elantp_linux::evdev::{self, Grab};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::keyboard::{self, Keyboards};
+use elantp_linux::notices::{self, Notices};
 use elantp_linux::output::{Devices, surface, touches};
 use gestus::{Config, Event, Gestures, Input, Surface};
 
@@ -65,11 +66,16 @@ struct Outputs {
 }
 
 impl Outputs {
-    fn deliver(&mut self, catalog: &Catalog, engine: &Gestures, events: Vec<Event>) -> Result<(), BoxError> {
+    fn deliver(&mut self, catalog: &Catalog, engine: &Gestures, events: Vec<Event>, listeners: &mut Option<Notices>) -> Result<(), BoxError> {
         for event in events {
             match self.devices.send(event)? {
                 Some(Event::Touch { fingers, x, y }) => self.touchpad.replay(fingers, x, y)?,
-                Some(Event::Notice(notice)) => say(catalog, &elantp_linux::notice(engine, notice)),
+                Some(Event::Notice(notice)) => {
+                    say(catalog, &elantp_linux::notice(engine, notice));
+                    if let Some(listeners) = listeners.as_mut() {
+                        listeners.send(&notices::line(engine, notice));
+                    }
+                }
                 _ => {}
             }
         }
@@ -125,7 +131,20 @@ fn listen(catalog: &Catalog, keyboards: &mut Keyboards, config: &Config) -> bool
     true
 }
 
-fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> Result<Outcome, BoxError> {
+fn open_notices(catalog: &Catalog) -> Option<Notices> {
+    match Notices::open(Path::new(notices::SOCKET)) {
+        Ok(opened) => {
+            say(catalog, &Msg::new("service-notices").arg("socket", notices::SOCKET));
+            Some(opened)
+        }
+        Err(e) => {
+            say(catalog, &Msg::new("service-notices-failed").arg("socket", notices::SOCKET).arg("detail", e));
+            None
+        }
+    }
+}
+
+fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp, listeners: &mut Option<Notices>) -> Result<Outcome, BoxError> {
     let Some(pad) = open_pad()? else { return Ok(Outcome::Foreign) };
     let surface: Surface = surface(&pad.layout);
     let failed = |e: std::io::Error| Fail::new("dev-uinput-failed").arg("detail", e);
@@ -165,14 +184,14 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
                 let Some(frame) = pad.layout.decode(&buffer[..length]).ok().and_then(|report| assembler.push(report)) else { continue };
                 outputs.button = frame.button;
                 let events = engine.feed(&Input { time: micros(started), button: frame.button, touches: touches(&pad.layout, &frame) });
-                outputs.deliver(catalog, &engine, events)?;
+                outputs.deliver(catalog, &engine, events, listeners)?;
                 outputs.show(&engine)?;
             }
         }
         let now = micros(started);
         if engine.deadline().is_some_and(|at| at <= now) {
             let events = engine.tick(now);
-            outputs.deliver(catalog, &engine, events)?;
+            outputs.deliver(catalog, &engine, events, listeners)?;
             outputs.show(&engine)?;
         }
         if checked.elapsed() >= RELOAD {
@@ -216,6 +235,7 @@ fn main() -> ExitCode {
     }
     let catalog = elantp_linux::catalog();
     let path = PathBuf::from(config::SYSTEM);
+    let mut listeners = open_notices(&catalog);
     let mut idle = false;
     while !STOP.load(Ordering::Relaxed) {
         let stamp = config::stamp(&path);
@@ -237,7 +257,7 @@ fn main() -> ExitCode {
             continue;
         }
         idle = false;
-        match serve(&catalog, &path, &loaded, stamp) {
+        match serve(&catalog, &path, &loaded, stamp, &mut listeners) {
             Ok(Outcome::Stopped) => break,
             Ok(Outcome::Idle) => {}
             Ok(Outcome::Foreign) => {

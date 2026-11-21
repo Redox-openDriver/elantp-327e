@@ -14,6 +14,7 @@ setup-next = Next:
 setup-next-desktop = speed, tapping, natural scrolling, disable while typing and workspace swipes are set in GNOME, KDE and other desktops, as for any touchpad
 setup-next-settings = your own gestures: copy { $example } to { $file } and turn on the sections you want — the service picks the changes up within a second; without that file the service leaves the touchpad alone
 setup-next-guide = every gesture and setting is described in { $guide }
+setup-next-notify = mode switches — numpad, tablet mode, touchpad off — show as notifications through { $program }: it starts with your next login, and you can start it yourself now
 setup-next-learn = a symbol of your own for drawing: { $elevate } elantp-dev learn <name>
 remove-usage = usage: uninstall.sh [--purge]
 remove-root-needed = administrator rights are needed, and neither sudo nor doas was found

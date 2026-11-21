@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=elantp-notify
+Exec=/usr/local/bin/elantp-notify
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

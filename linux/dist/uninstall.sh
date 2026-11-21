@@ -64,7 +64,7 @@ as_root rm -rf /etc/elantp/s6
 if [ -d /run/systemd/system ]; then
   as_root systemctl daemon-reload
 fi
-as_root rm -f /usr/local/bin/elantpd /usr/local/bin/elantp-dev
+as_root rm -f /usr/local/bin/elantpd /usr/local/bin/elantp-dev /usr/local/bin/elantp-notify /etc/xdg/autostart/elantp-notify.desktop
 as_root rm -rf /usr/local/share/doc/elantp
 
 if [ "$mode" = --purge ]; then

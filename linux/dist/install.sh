@@ -91,14 +91,16 @@ case $manager in
 esac
 have cargo || fail setup-no-cargo
 
-cargo build --release --locked -p elantp-linux
+cargo build --release --locked -p elantp-linux -p elantp-notify
 built=$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release
-for artifact in elantpd elantp-dev; do
+for artifact in elantpd elantp-dev elantp-notify; do
   [ -f "$built/$artifact" ] || fail setup-no-artifact path="$built/$artifact"
 done
 
 as_root install -Dm755 "$built/elantpd" /usr/local/bin/elantpd
 as_root install -Dm755 "$built/elantp-dev" /usr/local/bin/elantp-dev
+as_root install -Dm755 "$built/elantp-notify" /usr/local/bin/elantp-notify
+as_root install -Dm644 "$dist/notify/elantp-notify.desktop" /etc/xdg/autostart/elantp-notify.desktop
 as_root install -Dm644 README.md "$documents/README.md"
 as_root install -Dm644 docs/gestures.md "$documents/gestures.md"
 as_root install -Dm644 config/gestures.toml "$documents/gestures.toml"
@@ -150,3 +152,4 @@ item setup-next-desktop
 item setup-next-settings example="$documents/gestures.toml" file=/etc/elantp/gestures.toml
 item setup-next-guide guide="$documents/gestures.md"
 item setup-next-learn elevate="$elevate"
+item setup-next-notify program=/usr/local/bin/elantp-notify

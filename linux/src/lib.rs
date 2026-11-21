@@ -4,6 +4,7 @@ pub mod evdev;
 pub mod hidraw;
 pub mod keyboard;
 pub mod keys;
+pub mod notices;
 pub mod output;
 pub mod recording;
 pub mod session;
