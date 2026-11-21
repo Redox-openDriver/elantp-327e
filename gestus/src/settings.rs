@@ -518,6 +518,20 @@ impl Default for EdgeSwipes {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "config", derive(Deserialize), serde(default, deny_unknown_fields, rename_all = "kebab-case"))]
+pub struct Typing {
+    pub enabled: bool,
+    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::millis"))]
+    pub quiet: u64,
+}
+
+impl Default for Typing {
+    fn default() -> Self {
+        Typing { enabled: false, quiet: 500_000 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "config", derive(Deserialize), serde(default, deny_unknown_fields, rename_all = "kebab-case"))]
 pub struct Areas {
     pub enabled: bool,
     pub width: f32,
@@ -557,6 +571,7 @@ pub struct Config {
     pub tablet: Tablet,
     pub edge_swipes: EdgeSwipes,
     pub areas: Areas,
+    pub typing: Typing,
 }
 
 impl From<Settings> for Config {

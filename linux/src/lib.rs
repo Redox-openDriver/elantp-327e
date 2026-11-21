@@ -1,6 +1,7 @@
 pub mod config;
 pub mod evdev;
 pub mod hidraw;
+pub mod keyboard;
 pub mod keys;
 pub mod recording;
 pub mod session;

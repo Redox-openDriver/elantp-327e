@@ -219,6 +219,10 @@ mod tests {
             [numpad]
             enabled = true
             rows = [["7", "8", "9"], ["none", "0", "enter"]]
+
+            [typing]
+            enabled = true
+            quiet = 300
             "#,
         )
         .unwrap();
@@ -239,6 +243,7 @@ mod tests {
         assert_eq!(config.joystick.corner, Corner::BottomLeft);
         assert_eq!(config.symbols.action("circle"), Action::parse("calculator"));
         assert_eq!(config.numpad.rows[1], [None, Combo::parse("0"), Combo::parse("enter")]);
+        assert!(config.typing.enabled && config.typing.quiet == 300_000);
     }
 
     #[test]

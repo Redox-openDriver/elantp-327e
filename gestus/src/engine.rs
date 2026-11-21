@@ -166,6 +166,7 @@ pub struct Gestures {
     shaking: Shaking,
     covering: Option<Covering>,
     filters: Vec<(u8, OneEuro, OneEuro)>,
+    typed: Option<u64>,
 }
 
 fn by_fingers(count: usize) -> Button {
@@ -252,6 +253,7 @@ impl Gestures {
             shaking: Shaking::default(),
             covering: None,
             filters: Vec::new(),
+            typed: None,
         }
     }
 
@@ -269,6 +271,16 @@ impl Gestures {
 
     pub fn symbol(&self, index: u16) -> Option<&str> {
         self.recognizer.name(index)
+    }
+
+    pub fn typed(&mut self, time: u64) {
+        if self.config.typing.enabled {
+            self.typed = Some(time);
+        }
+    }
+
+    fn typing(&self, time: u64) -> bool {
+        self.typed.is_some_and(|at| time.saturating_sub(at) < self.config.typing.quiet)
     }
 
     pub fn deadline(&self) -> Option<u64> {
@@ -504,16 +516,22 @@ impl Gestures {
         self.anchor = None;
         self.shaking = Shaking::default();
         let first = fingers[0];
-        if !self.queue.is_empty() && (fingers.len() > 1 || !self.patterns.continues(&self.queue, first.x, first.y, unlocking(self.locked))) {
+        let typing = self.typing(time);
+        if !self.queue.is_empty() && (typing || fingers.len() > 1 || !self.patterns.continues(&self.queue, first.x, first.y, unlocking(self.locked))) {
             self.flush(time, out);
         }
         match self.tap_drag {
-            TapDrag::Waiting { .. } if fingers.len() == 1 && !self.locked => self.tap_drag = TapDrag::Dragging,
+            TapDrag::Waiting { .. } if fingers.len() == 1 && !self.locked && !typing => self.tap_drag = TapDrag::Dragging,
             TapDrag::Waiting { .. } => {
                 self.tap_drag = TapDrag::Idle;
                 out.push(Event::Release(Button::Left));
             }
             _ => {}
+        }
+        if typing {
+            self.claim = Claim::Consumed;
+            self.mark_claimed();
+            return;
         }
         if let Some(carry) = self.carry.as_mut() {
             carry.grace = None;
@@ -1877,6 +1895,28 @@ mod tests {
         assert!(clicks(&events).is_empty());
         assert!(pad.deadline().is_none_or(|at| at > end), "{:?}", pad.deadline());
         assert!(settle(&mut pad, end + 5_000_000).is_empty());
+    }
+
+    #[test]
+    fn touches_that_start_while_typing_are_ignored_and_earlier_ones_go_on() {
+        let mut config = Config::default();
+        config.typing.enabled = true;
+        let mut pad = with(config);
+        pad.typed(START - 100_000);
+        let mut brushed = lifted(slide(1, (40.0, 40.0), (60.0, 40.0), 10));
+        brushed.extend(tap(50.0, 30.0));
+        let (events, time) = play(&mut pad, &brushed, START);
+        assert!(events.is_empty(), "{events:?}");
+        let (events, time) = play(&mut pad, &tap(50.0, 30.0), time + 600_000);
+        assert_eq!(clicks(&events), [Event::Press(Button::Left), Event::Release(Button::Left)]);
+        let pointing: Frames = slide(1, (40.0, 40.0), (60.0, 40.0), 20).into_iter().map(|t| (false, t)).collect();
+        let (first, middle) = play(&mut pad, &pointing[..10], time);
+        pad.typed(middle);
+        let (rest, _) = play(&mut pad, &pointing[10..], middle);
+        assert!(total(&first).0 > 0.0 && total(&rest).0 > 0.0);
+        let mut off = gestures();
+        off.typed(START - 100_000);
+        assert_eq!(clicks(&play(&mut off, &tap(50.0, 30.0), START).0).len(), 2);
     }
 
     #[test]

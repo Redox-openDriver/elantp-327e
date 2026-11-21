@@ -13,6 +13,7 @@ use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
+use elantp_linux::keyboard::{self, Keyboards};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
 use elantp_linux::{evdev, keys, recording, uinput};
 use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
@@ -773,6 +774,16 @@ fn build(loaded: &Loaded, tweaks: Tweaks, surface: Surface) -> Gestures {
     Gestures::with_symbols(settings, surface, &loaded.symbols)
 }
 
+fn watch_typing(catalog: &Catalog, keyboards: &mut Keyboards, loaded: &Loaded) {
+    if !loaded.config.typing.enabled {
+        keyboards.clear();
+        return;
+    }
+    keyboards.refresh();
+    let message = if keyboards.count() == 0 { Msg::new("dev-typing-none") } else { Msg::new("dev-typing-keyboards").num("count", keyboards.count()) };
+    println!("{}", catalog.render(&message));
+}
+
 fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     let mut tweaks = Tweaks { natural: false, speed: 1.0 };
     let mut chosen: Option<PathBuf> = None;
@@ -809,13 +820,24 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     catch_interrupt();
     println!("{}", catalog.text("dev-drive-start"));
     let mut engine = build(&loaded, tweaks, surface);
+    let mut keyboards = Keyboards::default();
+    watch_typing(catalog, &mut keyboards, &loaded);
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
     let started = Instant::now();
     let mut checked = Instant::now();
     while !STOP.load(Ordering::Relaxed) {
         let wait = engine.deadline().map_or(POLL, |at| Duration::from_millis(at.saturating_sub(micros(started)).div_ceil(1000)).min(POLL));
-        if device.wait(wait)? {
+        let mut fds = vec![device.raw()];
+        fds.extend(keyboards.fds());
+        let ready = keyboard::wait(&fds, wait)?;
+        if ready[0] & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(std::io::Error::from(ErrorKind::BrokenPipe).into());
+        }
+        if ready[1..].iter().any(|events| *events != 0) && keyboards.typed() {
+            engine.typed(micros(started));
+        }
+        if ready[0] & libc::POLLIN != 0 {
             while let Some(length) = device.read(&mut buffer)? {
                 if length == 0 {
                     break;
@@ -840,6 +862,7 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
                     Ok(loaded) => {
                         outputs.let_go()?;
                         engine = build(&loaded, tweaks, surface);
+                        watch_typing(catalog, &mut keyboards, &loaded);
                         println!("{}", catalog.render(&Msg::new("dev-config-reloaded").arg("file", path.display())));
                     }
                     Err(e) => {

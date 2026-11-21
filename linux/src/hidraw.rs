@@ -59,6 +59,10 @@ impl Device {
         Ok(Device { file })
     }
 
+    pub fn raw(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+
     pub fn wait(&self, timeout: Duration) -> io::Result<bool> {
         let mut poll = libc::pollfd { fd: self.file.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);

@@ -121,3 +121,7 @@ right = "forward"
 
 [areas]
 enabled = false
+
+[typing]
+enabled = true
+quiet = 500

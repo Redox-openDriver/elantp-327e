@@ -6,6 +6,7 @@ pub enum Expect {
     Drag,
     Fingers { count: usize, frames: usize },
     MultiTaps(usize),
+    Palm(usize),
     Nothing,
 }
 
@@ -19,7 +20,7 @@ pub struct Scenario {
     pub expect: Expect,
 }
 
-pub const SCENARIOS: [Scenario; 9] = [
+pub const SCENARIOS: [Scenario; 14] = [
     Scenario { name: "move", title: "session-move", how: "session-move-how", hint: "session-move-hint", seconds: 20, expect: Expect::Travel(150.0) },
     Scenario { name: "tap", title: "session-tap", how: "session-tap-how", hint: "session-tap-hint", seconds: 20, expect: Expect::Taps(5) },
     Scenario { name: "click", title: "session-click", how: "session-click-how", hint: "session-click-hint", seconds: 20, expect: Expect::Presses(4) },
@@ -50,6 +51,39 @@ pub const SCENARIOS: [Scenario; 9] = [
         expect: Expect::Fingers { count: 2, frames: 60 },
     },
     Scenario { name: "palm", title: "session-palm", how: "session-palm-how", hint: "session-palm-hint", seconds: 30, expect: Expect::Nothing },
+    Scenario { name: "cover", title: "session-cover", how: "session-cover-how", hint: "session-cover-hint", seconds: 20, expect: Expect::Palm(40) },
+    Scenario {
+        name: "rotate",
+        title: "session-rotate",
+        how: "session-rotate-how",
+        hint: "session-rotate-hint",
+        seconds: 20,
+        expect: Expect::Fingers { count: 2, frames: 80 },
+    },
+    Scenario {
+        name: "pinch",
+        title: "session-pinch",
+        how: "session-pinch-how",
+        hint: "session-pinch-hint",
+        seconds: 20,
+        expect: Expect::Fingers { count: 2, frames: 80 },
+    },
+    Scenario {
+        name: "rails",
+        title: "session-rails",
+        how: "session-rails-how",
+        hint: "session-rails-hint",
+        seconds: 25,
+        expect: Expect::Fingers { count: 2, frames: 80 },
+    },
+    Scenario {
+        name: "symbols",
+        title: "session-symbols",
+        how: "session-symbols-how",
+        hint: "session-symbols-hint",
+        seconds: 30,
+        expect: Expect::Travel(300.0),
+    },
 ];
 
 pub const MAX_FINGERS: usize = 5;
@@ -142,6 +176,7 @@ impl Stats {
             Expect::Drag => self.presses >= 2 && self.drag_travel >= 20.0,
             Expect::Fingers { count, frames } => self.with[count.min(MAX_FINGERS)..].iter().sum::<usize>() >= frames,
             Expect::MultiTaps(count) => self.multi_taps >= count,
+            Expect::Palm(frames) => self.palm_frames >= frames,
             Expect::Nothing => true,
         }
     }
@@ -206,6 +241,9 @@ mod tests {
         }
         assert!(stats.done(Expect::Fingers { count: 3, frames: 3 }) && stats.done(Expect::Fingers { count: 2, frames: 3 }));
         assert!(!stats.done(Expect::Fingers { count: 3, frames: 4 }));
+        assert!(!stats.done(Expect::Palm(1)));
+        stats.add(110_000, false, &[Point { id: 4, x: 50.0, y: 40.0, palm: true }]);
+        assert!(stats.done(Expect::Palm(1)) && !stats.done(Expect::Palm(2)));
     }
 
     #[test]
