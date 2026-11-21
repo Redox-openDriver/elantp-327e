@@ -213,11 +213,11 @@ dependencies = [
 
 [[package]]
 name = "elantp-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "elantp-linux"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "drv-i18n",
  "elantp-core",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "elantp-notify"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "drv-i18n",
  "elantp-linux",

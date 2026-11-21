@@ -1,6 +1,6 @@
 [package]
 name = "elantp-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Тачпад ELAN 04F3:327E: HID over I2C и Precision Touchpad без привязки к ОС"
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "elantp-linux"
-version = "0.2.0"
+version = "0.3.0"
 description = "Тачпад ELAN 04F3:327E на Linux: поиск устройства, запись и разбор касаний для разработки"
 edition.workspace = true
 license.workspace = true
