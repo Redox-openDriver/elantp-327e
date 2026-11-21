@@ -29,6 +29,10 @@ const LEARN_TIMES: usize = 3;
 const MAX_LEARN_TIMES: usize = 10;
 const SHORTEST_STROKE: f32 = 8.0;
 
+fn stroke_length(stroke: &[(f32, f32)]) -> f32 {
+    stroke.windows(2).map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1)).sum()
+}
+
 static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn stop(_: libc::c_int) {
@@ -619,7 +623,10 @@ fn run_session(catalog: &Catalog, dir: Option<PathBuf>, only: &[&str]) -> Result
     let device = open(&found)?;
     let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
     let dir = dir.unwrap_or_else(|| Path::new("captures/touchpad").join(stamp()));
-    println!("{}", catalog.render(&Msg::new("session-intro").num("count", chosen.len())));
+    let seconds = chosen.iter().map(|scenario| scenario.seconds);
+    let intro =
+        Msg::new("session-intro").num("count", chosen.len()).num("shortest", seconds.clone().min().unwrap_or(0)).num("longest", seconds.max().unwrap_or(0));
+    println!("{}", catalog.render(&intro));
     println!("{}", catalog.text("session-intro-grab"));
     println!("{}", catalog.text("session-intro-keys"));
     if ask(catalog, "session-start") == Answer::Quit {
@@ -723,7 +730,7 @@ fn build(loaded: &Loaded, tweaks: Tweaks, surface: Surface) -> Gestures {
 }
 
 fn watch_typing(catalog: &Catalog, keyboards: &mut Keyboards, loaded: &Loaded) {
-    if !loaded.config.typing.enabled {
+    if !loaded.config.uses_typing(false) {
         keyboards.clear();
         return;
     }
@@ -769,7 +776,7 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     println!("{}", catalog.text("dev-drive-start"));
     let mut engine = build(&loaded, tweaks, surface);
     let mut keyboards = Keyboards::default();
-    let mut typing = loaded.config.typing.enabled;
+    let mut typing = loaded.config.uses_typing(false);
     watch_typing(catalog, &mut keyboards, &loaded);
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
@@ -815,7 +822,7 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
                         outputs.let_go()?;
                         outputs.tablet(loaded.config.tablet.enabled)?;
                         engine = build(&loaded, tweaks, surface);
-                        typing = loaded.config.typing.enabled;
+                        typing = loaded.config.uses_typing(false);
                         watch_typing(catalog, &mut keyboards, &loaded);
                         println!("{}", catalog.render(&Msg::new("dev-config-reloaded").arg("file", path.display())));
                     }
@@ -832,6 +839,62 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     drop(grab);
     drop(outputs);
     println!("{}", catalog.text("dev-drive-stop"));
+    Ok(())
+}
+
+fn symbols(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
+    let (mut learned_file, mut recording) = (None, None);
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        match *option {
+            "--file" => learned_file = Some(PathBuf::from(rest.next().copied().unwrap_or_default())),
+            other if !other.starts_with("--") && recording.is_none() => recording = Some(PathBuf::from(other)),
+            other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
+        }
+    }
+    let Some(path) = recording else {
+        println!("{}", catalog.text("dev-usage"));
+        return Ok(());
+    };
+    let learned_file = learned_file.unwrap_or_else(|| config::symbols_beside(Path::new(config::SYSTEM)));
+    let learned = gestus::config::load_symbols(&learned_file).map_err(config::failure)?;
+    let recognizer = gestus::Recognizer::new(&learned);
+    let threshold = gestus::Symbols::default().threshold;
+    let file = File::open(&path).map_err(|e| Fail::new("dev-read-failed").arg("file", path.display()).arg("detail", e))?;
+    let recorded =
+        recording::read(&mut BufReader::new(file)).map_err(|e| Fail::new("dev-bad-recording").arg("file", path.display()).arg("detail", format!("{e:?}")))?;
+    let layout = layout(&recorded.descriptor)?;
+    let mut assembler = Assembler::default();
+    let (mut stroke, mut spoiled, mut started) = (Vec::<(f32, f32)>::new(), false, 0u64);
+    let (mut strokes, mut recognized) = (0usize, 0usize);
+    for (micros, bytes) in &recorded.reports {
+        let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { continue };
+        let fingers: Vec<Touch> = touches(&layout, &frame).into_iter().filter(|touch| !touch.palm).collect();
+        match fingers.as_slice() {
+            [] => {
+                let finished = std::mem::take(&mut stroke);
+                if std::mem::take(&mut spoiled) || stroke_length(&finished) < SHORTEST_STROKE {
+                    continue;
+                }
+                let Some((name, score)) = recognizer.recognize(&finished).and_then(|(index, score)| recognizer.name(index).map(|name| (name, score))) else {
+                    continue;
+                };
+                strokes += 1;
+                recognized += usize::from(score >= threshold);
+                let key = if score >= threshold { "dev-symbol-stroke" } else { "dev-symbol-weak" };
+                let message = Msg::new(key).arg("time", format!("{:.1}", started as f64 / 1000.0)).arg("name", name).arg("score", format!("{score:.2}"));
+                println!("{}", catalog.render(&message));
+            }
+            [finger] => {
+                if stroke.is_empty() {
+                    started = *micros;
+                }
+                stroke.push((finger.x, finger.y));
+            }
+            _ => spoiled = true,
+        }
+    }
+    println!("{}", catalog.render(&Msg::new("dev-symbols-summary").num("strokes", strokes).num("recognized", recognized)));
     Ok(())
 }
 
@@ -878,10 +941,9 @@ fn learn(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
             return Ok(());
         }
         let finished = std::mem::take(&mut stroke);
-        let length: f32 = finished.windows(2).map(|pair| ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt()).sum();
         if std::mem::take(&mut most) > 1 {
             println!("{}", catalog.text("dev-learn-one-finger"));
-        } else if length < SHORTEST_STROKE {
+        } else if stroke_length(&finished) < SHORTEST_STROKE {
             println!("{}", catalog.text("dev-learn-short"));
         } else if let Some(points) = gestus::normalize(&finished) {
             samples.push(points);
@@ -965,6 +1027,7 @@ fn main() -> ExitCode {
         ["show", file] => show(&catalog, Path::new(file)),
         ["gestures", options @ ..] => gestures(&catalog, options),
         ["learn", options @ ..] => learn(&catalog, options),
+        ["symbols", options @ ..] => symbols(&catalog, options),
         ["live"] => live(&catalog),
         ["drive", options @ ..] => drive(&catalog, options),
         ["session", "--dir", dir, only @ ..] => run_session(&catalog, Some(PathBuf::from(dir)), only),

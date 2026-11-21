@@ -11,8 +11,9 @@ use elantp_linux::clone::Touchpad;
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::evdev::{self, Grab};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
+use elantp_linux::keyboard::{self, Keyboards};
 use elantp_linux::output::{Devices, surface, touches};
-use gestus::{Event, Gestures, Input, Surface};
+use gestus::{Config, Event, Gestures, Input, Surface};
 
 type BoxError = Box<dyn std::error::Error>;
 type Stamp = Option<(SystemTime, Option<SystemTime>)>;
@@ -113,6 +114,17 @@ fn build(loaded: &Loaded, surface: Surface) -> Gestures {
     Gestures::with_symbols(loaded.config.clone(), surface, &loaded.symbols).native()
 }
 
+fn listen(catalog: &Catalog, keyboards: &mut Keyboards, config: &Config) -> bool {
+    if !config.uses_typing(true) {
+        keyboards.clear();
+        return false;
+    }
+    keyboards.refresh();
+    let message = if keyboards.count() == 0 { Msg::new("service-keyboards-none") } else { Msg::new("service-keyboards").num("count", keyboards.count()) };
+    say(catalog, &message);
+    true
+}
+
 fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> Result<Outcome, BoxError> {
     let Some(pad) = open_pad()? else { return Ok(Outcome::Foreign) };
     let surface: Surface = surface(&pad.layout);
@@ -125,6 +137,8 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
     let grab: Grab = evdev::grab(&pad.nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
     say(catalog, &Msg::new("service-started").arg("device", &pad.identity.name).arg("node", pad.found.node.display()));
     let mut engine = build(loaded, surface);
+    let mut keyboards = Keyboards::default();
+    let mut listening = listen(catalog, &mut keyboards, &loaded.config);
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
     let started = Instant::now();
@@ -134,7 +148,16 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
             break Outcome::Stopped;
         }
         let wait = engine.deadline().map_or(POLL, |at| Duration::from_millis(at.saturating_sub(micros(started)).div_ceil(1000)).min(POLL));
-        if pad.device.wait(wait)? {
+        let mut fds = vec![pad.device.raw()];
+        fds.extend(keyboards.fds());
+        let ready = keyboard::wait(&fds, wait)?;
+        if ready[0] & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into());
+        }
+        if ready[1..].iter().any(|events| *events != 0) && keyboards.typed() {
+            engine.typed(micros(started));
+        }
+        if ready[0] & libc::POLLIN != 0 {
             while let Some(length) = pad.device.read(&mut buffer)? {
                 if length == 0 {
                     break;
@@ -154,6 +177,9 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
         }
         if checked.elapsed() >= RELOAD {
             checked = Instant::now();
+            if listening {
+                keyboards.refresh();
+            }
             let fresh = config::stamp(path);
             if fresh != stamp {
                 stamp = fresh;
@@ -163,6 +189,7 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
                         outputs.let_go()?;
                         outputs.devices.tablet(loaded.config.tablet.enabled)?;
                         engine = build(&loaded, surface);
+                        listening = listen(catalog, &mut keyboards, &loaded.config);
                         outputs.show(&engine)?;
                         say(catalog, &Msg::new("service-reloaded").arg("file", path.display()));
                     }

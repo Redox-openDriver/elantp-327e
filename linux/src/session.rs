@@ -51,14 +51,14 @@ pub const SCENARIOS: [Scenario; 14] = [
         expect: Expect::Fingers { count: 2, frames: 60 },
     },
     Scenario { name: "palm", title: "session-palm", how: "session-palm-how", hint: "session-palm-hint", seconds: 30, expect: Expect::Nothing },
-    Scenario { name: "cover", title: "session-cover", how: "session-cover-how", hint: "session-cover-hint", seconds: 20, expect: Expect::Palm(40) },
+    Scenario { name: "cover", title: "session-cover", how: "session-cover-how", hint: "session-cover-hint", seconds: 30, expect: Expect::Palm(40) },
     Scenario {
         name: "rotate",
         title: "session-rotate",
         how: "session-rotate-how",
         hint: "session-rotate-hint",
         seconds: 20,
-        expect: Expect::Fingers { count: 2, frames: 80 },
+        expect: Expect::Fingers { count: 2, frames: 400 },
     },
     Scenario {
         name: "pinch",
@@ -66,7 +66,7 @@ pub const SCENARIOS: [Scenario; 14] = [
         how: "session-pinch-how",
         hint: "session-pinch-hint",
         seconds: 20,
-        expect: Expect::Fingers { count: 2, frames: 80 },
+        expect: Expect::Fingers { count: 2, frames: 400 },
     },
     Scenario {
         name: "rails",
@@ -74,14 +74,14 @@ pub const SCENARIOS: [Scenario; 14] = [
         how: "session-rails-how",
         hint: "session-rails-hint",
         seconds: 25,
-        expect: Expect::Fingers { count: 2, frames: 80 },
+        expect: Expect::Fingers { count: 2, frames: 400 },
     },
     Scenario {
         name: "symbols",
         title: "session-symbols",
         how: "session-symbols-how",
         hint: "session-symbols-hint",
-        seconds: 30,
+        seconds: 60,
         expect: Expect::Travel(300.0),
     },
 ];

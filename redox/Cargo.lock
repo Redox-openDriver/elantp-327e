@@ -210,8 +210,8 @@ dependencies = [
 
 [[package]]
 name = "gestus"
-version = "0.1.0"
-source = "git+https://github.com/Redox-openDriver/gestus?tag=v0.1.0#9f2aa3603a293ee6505eb159e186ecbfd546a3f1"
+version = "0.2.0"
+source = "git+https://github.com/Redox-openDriver/gestus?tag=v0.2.0#f09f9f8879cd4f8e6ec4321ce1365e320182b498"
 dependencies = [
  "libm",
  "serde",
