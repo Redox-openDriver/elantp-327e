@@ -1,3 +1,4 @@
+pub mod clone;
 pub mod config;
 pub mod evdev;
 pub mod hidraw;

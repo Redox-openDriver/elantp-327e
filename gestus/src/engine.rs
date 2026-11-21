@@ -63,6 +63,7 @@ struct Sequence {
     clicked: bool,
     origin: (f32, f32),
     claimed: bool,
+    hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,7 @@ enum Claim {
     Circle { id: u8, last: f32, turned: f32 },
     Joystick { id: u8, center: (f32, f32) },
     Symbol { id: u8, points: Vec<(f32, f32)> },
+    Holding { id: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +136,7 @@ struct Covering {
 pub struct Gestures {
     config: Config,
     surface: Surface,
+    native: bool,
     patterns: Patterns,
     recognizer: Recognizer,
     window: u64,
@@ -146,6 +149,7 @@ pub struct Gestures {
     pending_since: Option<u64>,
     split: [(f32, f32); 2],
     held: Option<Held>,
+    held_ours: bool,
     sequence: Option<Sequence>,
     last: Option<u64>,
     claim: Claim,
@@ -215,12 +219,13 @@ impl Gestures {
     }
 
     pub fn with_symbols(config: Config, surface: Surface, learned: &[Template]) -> Self {
-        let patterns = Patterns::new(&config, surface);
+        let patterns = Patterns::new(&config, surface, true);
         let recognizer = if config.symbols.enabled { Recognizer::new(learned) } else { Recognizer::default() };
         let window = if config.knock.enabled { config.taps.window.max(config.knock.window) } else { config.taps.window };
         Gestures {
             config,
             surface,
+            native: false,
             patterns,
             recognizer,
             window,
@@ -233,6 +238,7 @@ impl Gestures {
             pending_since: None,
             split: [(0.0, 0.0); 2],
             held: None,
+            held_ours: false,
             sequence: None,
             last: None,
             claim: Claim::None,
@@ -255,6 +261,23 @@ impl Gestures {
             filters: Vec::new(),
             typed: None,
         }
+    }
+
+    pub fn native(mut self) -> Self {
+        self.native = true;
+        self.patterns = Patterns::new(&self.config, self.surface, false);
+        self
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.locked || self.tablet || self.claim != Claim::None
+    }
+
+    pub fn visible(&self) -> Vec<Touch> {
+        if self.hidden() {
+            return Vec::new();
+        }
+        self.fingers.iter().map(|finger| Touch { id: finger.id, x: finger.x, y: finger.y, palm: finger.palm }).collect()
     }
 
     pub fn locked(&self) -> bool {
@@ -280,7 +303,7 @@ impl Gestures {
     }
 
     fn typing(&self, time: u64) -> bool {
-        self.typed.is_some_and(|at| time.saturating_sub(at) < self.config.typing.quiet)
+        !self.native && self.typed.is_some_and(|at| time.saturating_sub(at) < self.config.typing.quiet)
     }
 
     pub fn deadline(&self) -> Option<u64> {
@@ -443,7 +466,8 @@ impl Gestures {
         let starting = self.sequence.is_none() && !fingers.is_empty();
         if !fingers.is_empty() {
             let origin = (fingers[0].x, fingers[0].y);
-            let sequence = self.sequence.get_or_insert(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin, claimed: false });
+            let sequence =
+                self.sequence.get_or_insert(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin, claimed: false, hidden: false });
             sequence.most = sequence.most.max(working.len().max(1) as u8);
             sequence.travelled = working.iter().fold(sequence.travelled, |most, finger| most.max(finger.travelled));
             if self.fling.is_some_and(|fling| time.saturating_sub(fling.ended) > LIFT_GRACE) {
@@ -478,7 +502,15 @@ impl Gestures {
         }
         if !fingers.is_empty() {
             let free = self.claimed(moves, elapsed, time, out);
-            if free && same_fingers && catch_up && working.len() == 1 {
+            if self.native {
+                if free
+                    && same_fingers
+                    && let [finger] = working.as_slice()
+                {
+                    let step = moves.iter().find(|(id, _, _)| *id == finger.id).map_or((0.0, 0.0), |(_, dx, dy)| (*dx, *dy));
+                    self.shake(step, time, out);
+                }
+            } else if free && same_fingers && catch_up && working.len() == 1 {
                 let finger = working[0];
                 self.enter(Mode::Pointer, time);
                 self.point((finger.x - finger.x0, finger.y - finger.y0), elapsed, time, 1.0, out);
@@ -499,6 +531,18 @@ impl Gestures {
     fn mark_claimed(&mut self) {
         if let Some(sequence) = self.sequence.as_mut() {
             sequence.claimed = true;
+        }
+    }
+
+    fn mark_hidden(&mut self) {
+        if let Some(sequence) = self.sequence.as_mut() {
+            sequence.hidden = true;
+        }
+    }
+
+    fn mark_shown(&mut self) {
+        if let Some(sequence) = self.sequence.as_mut() {
+            sequence.hidden = false;
         }
     }
 
@@ -537,6 +581,7 @@ impl Gestures {
             carry.grace = None;
         }
         if self.locked {
+            self.mark_hidden();
             return;
         }
         if fingers.len() > 1 {
@@ -547,15 +592,23 @@ impl Gestures {
             self.drawing = None;
             self.claim = Claim::Symbol { id: first.id, points: vec![(first.x, first.y)] };
             self.mark_claimed();
+            self.mark_hidden();
             return;
         }
         let joystick = self.config.joystick;
         if joystick.enabled && joystick.corner.contains(first.x, first.y, self.surface, joystick.size) {
             self.claim = Claim::Joystick { id: first.id, center: (first.x, first.y) };
+            self.mark_hidden();
+            return;
+        }
+        if self.native && (self.numpad || self.patterns.starts(&[Tap { fingers: 1, x: first.x, y: first.y, at: time }], unlocking(self.locked))) {
+            self.claim = Claim::Holding { id: first.id };
+            self.mark_hidden();
             return;
         }
         if self.zoned(first.x, first.y) {
             self.claim = Claim::Deciding { id: first.id };
+            self.mark_hidden();
         }
     }
 
@@ -576,7 +629,10 @@ impl Gestures {
                 out.push(Event::Notice(Notice::Unrecognized));
                 return;
             }
-            Claim::Deciding { .. } | Claim::Joystick { .. } => self.claim = Claim::None,
+            Claim::Deciding { .. } | Claim::Joystick { .. } | Claim::Holding { .. } => {
+                self.claim = Claim::None;
+                self.mark_shown();
+            }
             Claim::Rail { .. } | Claim::Circle { .. } => {
                 self.claim = Claim::Consumed;
                 return;
@@ -612,10 +668,15 @@ impl Gestures {
         let config = &self.config;
         let rails =
             config.rails.enabled && Edge::ALL.iter().any(|edge| self.rail_slider(*edge) != Slider::Off && edge.near(x, y, self.surface, config.rails.width));
+        let near = |edges: [Edge; 2]| edges.iter().any(|edge| edge.near(x, y, self.surface, config.rails.width));
+        let hands = self.native
+            && config.rails.enabled
+            && ((config.rails.sides != Slider::Off && near([Edge::Left, Edge::Right]))
+                || (config.rails.top_bottom != Slider::Off && near([Edge::Top, Edge::Bottom])));
         let circular = config.circular.enabled && Edge::ALL.iter().any(|edge| edge.near(x, y, self.surface, config.circular.width));
         let swipes = config.edge_swipes.enabled
             && Edge::ALL.iter().any(|edge| self.edge_swipe(*edge).is_some() && edge.near(x, y, self.surface, config.edge_swipes.width));
-        rails || circular || swipes
+        rails || hands || circular || swipes
     }
 
     fn two_hands(&mut self, fingers: &[Finger], time: u64, out: &mut Vec<Event>) {
@@ -659,8 +720,16 @@ impl Gestures {
                 self.stroke(id, &mut points);
                 (Claim::Symbol { id, points }, false)
             }
+            Claim::Holding { id } => {
+                let tap_travel = self.config.pointer.tap_travel;
+                let still = self.sequence.is_some_and(|sequence| sequence.most == 1 && !sequence.clicked && sequence.travelled <= tap_travel);
+                (if still { Claim::Holding { id } } else { Claim::None }, false)
+            }
         };
         if self.claim != Claim::Consumed {
+            if claim == Claim::None {
+                self.mark_shown();
+            }
             self.claim = claim;
         }
         free
@@ -668,6 +737,9 @@ impl Gestures {
 
     fn decide(&mut self, id: u8, elapsed: u64, time: u64, out: &mut Vec<Event>) -> (Claim, bool) {
         let Some(finger) = self.fingers.iter().copied().find(|finger| finger.id == id) else { return (Claim::None, true) };
+        if self.native && self.held.is_some() {
+            return (Claim::None, false);
+        }
         let (dx, dy) = (finger.x - finger.x0, finger.y - finger.y0);
         let swipes = self.config.edge_swipes;
         let fresh = swipes.enabled && time.saturating_sub(finger.landed) <= swipes.time;
@@ -720,7 +792,7 @@ impl Gestures {
         }) {
             return (Claim::Deciding { id }, false);
         }
-        if !finger.edge && self.working.contains(&id) {
+        if !self.native && !finger.edge && self.working.contains(&id) {
             self.enter(Mode::Pointer, time);
             self.point((dx, dy), elapsed, time, 1.0, out);
         }
@@ -1065,12 +1137,17 @@ impl Gestures {
                 } else {
                     let button = self.pressed(fingers, working);
                     self.held = Some(Held::Button(button));
-                    out.push(Event::Press(button));
+                    self.held_ours = !self.native || matches!(self.claim, Claim::Joystick { .. });
+                    if self.held_ours {
+                        out.push(Event::Press(button));
+                    }
                 }
             }
             (false, Some(held)) => {
                 self.held = None;
-                if let Held::Button(button) = held {
+                if let Held::Button(button) = held
+                    && core::mem::take(&mut self.held_ours)
+                {
                     out.push(Event::Release(button));
                 }
             }
@@ -1105,8 +1182,13 @@ impl Gestures {
             let s = &self.config.pointer;
             let limit = if sequence.most > 1 { s.multi_tap_time } else { s.tap_time };
             let quick = time.saturating_sub(sequence.started) <= limit;
-            let tap = s.tap && quick && !sequence.clicked && sequence.travelled <= s.tap_travel && self.held.is_none() && !sequence.claimed;
-            if self.tap_drag == TapDrag::Dragging {
+            let still = quick && !sequence.clicked && sequence.travelled <= s.tap_travel && self.held.is_none() && !sequence.claimed;
+            let tap = s.tap && still;
+            if self.native {
+                if still && sequence.hidden {
+                    self.tapped(Tap { fingers: sequence.most, x: sequence.origin.0, y: sequence.origin.1, at: time }, time, out);
+                }
+            } else if self.tap_drag == TapDrag::Dragging {
                 self.tap_drag = TapDrag::Idle;
                 out.push(Event::Release(Button::Left));
                 if tap && !self.locked {
@@ -1162,7 +1244,9 @@ impl Gestures {
             Some(action) => self.act(action, time, out),
             None if !self.locked => {
                 for tap in &queue {
-                    if let Some(action) = self.config.taps.binding(tap.fingers) {
+                    if self.native {
+                        out.push(Event::Touch { fingers: tap.fingers, x: tap.x, y: tap.y });
+                    } else if let Some(action) = self.config.taps.binding(tap.fingers) {
                         self.act(action, time, out);
                     }
                 }
@@ -1201,6 +1285,10 @@ impl Gestures {
             self.flush(time, out);
         }
         if self.locked {
+            return;
+        }
+        if self.native {
+            out.push(Event::Touch { fingers: tap.fingers, x: tap.x, y: tap.y });
             return;
         }
         match self.config.taps.binding(tap.fingers) {
@@ -1274,7 +1362,9 @@ impl Gestures {
     fn let_go(&mut self, time: u64, out: &mut Vec<Event>) {
         self.end_mode(time, out);
         if let Some(Held::Button(button)) = self.held {
-            out.push(Event::Release(button));
+            if core::mem::take(&mut self.held_ours) {
+                out.push(Event::Release(button));
+            }
             self.held = Some(Held::Ignored);
         }
         if self.carry.take().is_some() {
@@ -1334,7 +1424,8 @@ impl Gestures {
         };
         if self.sequence.is_none() {
             self.claim = Claim::None;
-            self.sequence = Some(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin: (first.x, first.y), claimed: false });
+            self.sequence =
+                Some(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin: (first.x, first.y), claimed: false, hidden: false });
         }
         if let Some(sequence) = self.sequence.as_mut() {
             sequence.most = sequence.most.max(u8::try_from(fingers.len()).unwrap_or(u8::MAX));
@@ -1917,6 +2008,133 @@ mod tests {
         let mut off = gestures();
         off.typed(START - 100_000);
         assert_eq!(clicks(&play(&mut off, &tap(50.0, 30.0), START).0).len(), 2);
+    }
+
+    fn native(config: Config) -> Gestures {
+        Gestures::new(config, PAD).native()
+    }
+
+    fn watch(gestures: &mut Gestures, frames: &[(bool, Vec<Touch>)], from: u64) -> (Vec<Event>, Vec<usize>, u64) {
+        let mut events = Vec::new();
+        let mut shown = Vec::new();
+        let mut time = from;
+        for (button, touches) in frames {
+            events.extend(settle(gestures, time.saturating_sub(1)));
+            events.extend(gestures.feed(&Input { time, button: *button, touches: touches.clone() }));
+            shown.push(gestures.visible().len());
+            time += STEP;
+        }
+        (events, shown, time)
+    }
+
+    #[test]
+    fn in_native_mode_the_usual_gestures_are_left_to_the_system_and_every_touch_is_shown() {
+        let mut pad = native(Config::default());
+        let mut frames = lifted(slide(1, (30.0, 30.0), (60.0, 30.0), 20));
+        frames.extend(tap(50.0, 30.0));
+        frames.extend([(false, vec![touch(1, 40.0, 30.0), touch(2, 60.0, 30.0)]), (true, vec![touch(1, 40.0, 30.0), touch(2, 60.0, 30.0)]), (false, vec![])]);
+        frames.extend(lifted((0..=20).map(|i| vec![touch(1, 40.0, 20.0 + i as f32), touch(2, 60.0, 20.0 + i as f32)]).collect()));
+        let (events, shown, _) = watch(&mut pad, &frames, START);
+        assert!(events.is_empty(), "{events:?}");
+        let expected: Vec<usize> = frames.iter().map(|(_, touches)| touches.len()).collect();
+        assert_eq!(shown, expected);
+        assert!(!pad.hidden());
+    }
+
+    #[test]
+    fn in_native_mode_corner_taps_are_held_back_and_handed_over_when_they_are_not_ours() {
+        let mut config = Config::default();
+        config.corners.enabled = true;
+        config.corners.top_left.double_tap = action("toggle-touchpad");
+        let mut pad = native(config);
+        let (events, shown, time) = watch(&mut pad, &tap(5.0, 5.0), START);
+        assert!(events.is_empty() && shown.iter().all(|count| *count == 0), "{events:?} {shown:?}");
+        assert_eq!(settle(&mut pad, time + 1_000_000), [Event::Touch { fingers: 1, x: 5.0, y: 5.0 }]);
+        let mut twice = tap(5.0, 5.0);
+        twice.extend(tap(5.5, 5.2));
+        let (events, shown, time) = watch(&mut pad, &twice, time + 1_000_000);
+        assert_eq!(events, [Event::Notice(Notice::Touchpad(false))]);
+        assert!(shown.iter().all(|count| *count == 0));
+        let (events, shown, time) = watch(&mut pad, &lifted(slide(1, (40.0, 30.0), (80.0, 30.0), 20)), time);
+        assert!(events.is_empty() && shown.iter().all(|count| *count == 0));
+        let (events, _, time) = watch(&mut pad, &twice, time);
+        assert_eq!(events, [Event::Notice(Notice::Touchpad(true))]);
+        let (events, shown, _) = watch(&mut pad, &lifted(slide(1, (5.0, 5.0), (40.0, 30.0), 20)), time + 1_000_000);
+        assert!(events.is_empty());
+        assert_eq!(shown[0], 0);
+        assert!(shown[2..shown.len() - 1].iter().all(|count| *count == 1), "{shown:?}");
+    }
+
+    #[test]
+    fn in_native_mode_rails_and_the_numpad_take_their_fingers_away_from_the_system() {
+        let mut config = Config::default();
+        config.rails.enabled = true;
+        config.rails.sides = Slider::preset("volume").unwrap();
+        let hands = lifted((0..=40).map(|i| vec![touch(1, 4.0, 50.0 - i as f32 * 0.5), touch(2, 113.0, 50.0 - i as f32 * 0.5)]).collect());
+        let (events, shown, _) = watch(&mut native(config), &hands, START);
+        assert_eq!(pressed_keys(&events), [Key::VolumeUp; 5]);
+        assert!(shown.iter().all(|count| *count == 0), "{shown:?}");
+        let mut config = Config::default();
+        config.corners.enabled = true;
+        config.corners.top_right.hold = action("numpad");
+        config.numpad.enabled = true;
+        let mut pad = native(config);
+        let mut hold = still(130, vec![touch(1, 110.0, 5.0)]);
+        hold.push((false, vec![]));
+        let (events, _, time) = watch(&mut pad, &hold, START);
+        assert_eq!(notices(&events), [Notice::Numpad(true)]);
+        let (events, shown, time) = watch(&mut pad, &tap(10.0, 8.0), time);
+        assert_eq!(pressed_keys(&events), [Key::Digit7]);
+        assert!(shown.iter().all(|count| *count == 0));
+        let (events, shown, _) = watch(&mut pad, &lifted(slide(1, (40.0, 30.0), (70.0, 30.0), 20)), time);
+        assert!(events.is_empty());
+        assert!(shown[3..shown.len() - 1].iter().all(|count| *count == 1), "{shown:?}");
+    }
+
+    #[test]
+    fn in_native_mode_a_quick_tap_the_system_never_saw_is_handed_over() {
+        let mut config = Config::default();
+        config.rails.enabled = true;
+        config.rails.top_bottom = Slider::preset("brightness").unwrap();
+        config.joystick.enabled = true;
+        let mut pad = native(config);
+        let (events, shown, time) = watch(&mut pad, &tap(60.0, 66.0), START);
+        assert_eq!(events, [Event::Touch { fingers: 1, x: 60.0, y: 66.0 }]);
+        assert!(shown.iter().all(|count| *count == 0));
+        let (events, _, time) = watch(&mut pad, &tap(105.0, 60.0), time + 1_000_000);
+        assert_eq!(events, [Event::Touch { fingers: 1, x: 105.0, y: 60.0 }]);
+        let mut slow = still(30, vec![touch(1, 60.0, 66.0)]);
+        slow.push((false, vec![]));
+        let (events, shown, _) = watch(&mut pad, &slow, time + 1_000_000);
+        assert!(events.is_empty() && shown.iter().all(|count| *count == 0));
+    }
+
+    #[test]
+    fn in_native_mode_a_hidden_finger_is_shown_once_it_moves_or_presses_and_never_just_for_lying_still() {
+        let mut config = Config::default();
+        config.rails.enabled = true;
+        config.rails.top_bottom = Slider::preset("brightness").unwrap();
+        let resting = touch(1, 60.0, 66.0);
+        let mut frames = still(40, vec![resting]);
+        frames.push((false, vec![]));
+        let (events, shown, _) = watch(&mut native(config.clone()), &frames, START);
+        assert!(events.is_empty() && shown.iter().all(|count| *count == 0), "{events:?} {shown:?}");
+        let press = [(false, vec![resting]), (true, vec![resting]), (true, vec![resting]), (false, vec![resting]), (false, vec![])];
+        let (events, shown, _) = watch(&mut native(config.clone()), &press, START);
+        assert!(events.is_empty());
+        assert_eq!(shown, [0, 1, 1, 1, 0]);
+        let moving = lifted(slide(1, (60.0, 66.0), (75.0, 50.0), 15));
+        let (events, shown, _) = watch(&mut native(config), &moving, START);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(shown[0], 0);
+        assert!(shown[2..shown.len() - 1].iter().all(|count| *count == 1), "{shown:?}");
+        let mut config = Config::default();
+        config.joystick.enabled = true;
+        let corner = touch(1, 105.0, 60.0);
+        let click = [(false, vec![corner]), (true, vec![corner]), (false, vec![corner]), (false, vec![])];
+        let (events, shown, _) = watch(&mut native(config), &click, START);
+        assert_eq!(clicks(&events), [Event::Press(Button::Left), Event::Release(Button::Left)]);
+        assert!(shown.iter().all(|count| *count == 0));
     }
 
     #[test]

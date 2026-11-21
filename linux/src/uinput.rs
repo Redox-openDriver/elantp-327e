@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 
-const UI_SET_EVBIT: libc::c_ulong = 0x4004_5564;
+pub(crate) const UI_SET_EVBIT: libc::c_ulong = 0x4004_5564;
 const UI_SET_KEYBIT: libc::c_ulong = 0x4004_5565;
 const UI_SET_RELBIT: libc::c_ulong = 0x4004_5566;
 const UI_SET_ABSBIT: libc::c_ulong = 0x4004_5567;
@@ -12,17 +12,17 @@ const UI_ABS_SETUP: libc::c_ulong = 0x401c_5504;
 const UI_DEV_SETUP: libc::c_ulong = 0x405c_5503;
 const UI_DEV_CREATE: libc::c_ulong = 0x5501;
 const UI_DEV_DESTROY: libc::c_ulong = 0x5502;
-const EV_SYN: u16 = 0;
-const EV_KEY: u16 = 1;
+pub(crate) const EV_SYN: u16 = 0;
+pub(crate) const EV_KEY: u16 = 1;
 const EV_REL: u16 = 2;
-const EV_ABS: u16 = 3;
-const ABS_X: u16 = 0;
-const ABS_Y: u16 = 1;
+pub(crate) const EV_ABS: u16 = 3;
+pub(crate) const ABS_X: u16 = 0;
+pub(crate) const ABS_Y: u16 = 1;
 const BTN_TOOL_PEN: u16 = 0x140;
-const BTN_TOUCH: u16 = 0x14a;
-const INPUT_PROP_POINTER: u16 = 0;
+pub(crate) const BTN_TOUCH: u16 = 0x14a;
+pub(crate) const INPUT_PROP_POINTER: u16 = 0;
 const PEN_UNITS: i32 = 10_000;
-const SYN_REPORT: u16 = 0;
+pub(crate) const SYN_REPORT: u16 = 0;
 const REL_X: u16 = 0;
 const REL_Y: u16 = 1;
 const REL_HWHEEL: u16 = 6;
@@ -53,7 +53,19 @@ pub struct Pointer {
     notches: (i32, i32),
 }
 
-fn control(file: &File, request: libc::c_ulong, value: libc::c_int) -> io::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Id {
+    pub bus: u16,
+    pub vendor: u16,
+    pub product: u16,
+    pub version: u16,
+}
+
+impl Id {
+    pub const VIRTUAL: Id = Id { bus: BUS_VIRTUAL, vendor: 0, product: 0, version: 1 };
+}
+
+pub(crate) fn control(file: &File, request: libc::c_ulong, value: libc::c_int) -> io::Result<()> {
     if unsafe { libc::ioctl(file.as_raw_fd(), request, value) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -75,10 +87,10 @@ pub fn whole(carry: &mut f32, delta: f32) -> i32 {
     step as i32
 }
 
-fn create(name: &str, setup: impl FnOnce(&File) -> io::Result<()>) -> io::Result<File> {
+pub(crate) fn create(name: &str, id: Id, setup: impl FnOnce(&File) -> io::Result<()>) -> io::Result<File> {
     let file = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK).open("/dev/uinput")?;
     setup(&file)?;
-    let mut device = Setup { bus: BUS_VIRTUAL, vendor: 0, product: 0, version: 1, name: [0; 80], effects: 0 };
+    let mut device = Setup { bus: id.bus, vendor: id.vendor, product: id.product, version: id.version, name: [0; 80], effects: 0 };
     let length = name.len().min(device.name.len() - 1);
     device.name[..length].copy_from_slice(&name.as_bytes()[..length]);
     if unsafe { libc::ioctl(file.as_raw_fd(), UI_DEV_SETUP, &device) } != 0 {
@@ -90,6 +102,41 @@ fn create(name: &str, setup: impl FnOnce(&File) -> io::Result<()>) -> io::Result
     Ok(file)
 }
 
+pub(crate) fn axis(file: &File, code: u16, minimum: i32, maximum: i32, resolution: i32) -> io::Result<()> {
+    control(file, UI_SET_ABSBIT, code.into())?;
+    let setup = AbsSetup { code, value: minimum, minimum, maximum, fuzz: 0, flat: 0, resolution };
+    if unsafe { libc::ioctl(file.as_raw_fd(), UI_ABS_SETUP, &setup) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub(crate) fn properties(file: &File, properties: &[u16]) -> io::Result<()> {
+    for property in properties {
+        control(file, UI_SET_PROPBIT, (*property).into())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn keys(file: &File, codes: impl IntoIterator<Item = u16>) -> io::Result<()> {
+    control(file, UI_SET_EVBIT, EV_KEY.into())?;
+    for code in codes {
+        control(file, UI_SET_KEYBIT, code.into())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write(file: &mut File, events: &[(u16, u16, i32)]) -> io::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut bytes = Vec::with_capacity(events.len() * 24);
+    for (kind, code, value) in events {
+        bytes.extend_from_slice(&event(*kind, *code, *value));
+    }
+    file.write_all(&bytes)
+}
+
 fn send(file: &mut File, events: &[[u8; 24]]) -> io::Result<()> {
     let mut bytes = Vec::with_capacity(events.len() * 24 + 24);
     for event in events {
@@ -99,18 +146,15 @@ fn send(file: &mut File, events: &[[u8; 24]]) -> io::Result<()> {
     file.write_all(&bytes)
 }
 
-fn destroy(file: &File) {
+pub(crate) fn destroy(file: &File) {
     unsafe { libc::ioctl(file.as_raw_fd(), UI_DEV_DESTROY) };
 }
 
 impl Pointer {
     pub fn create(name: &str) -> io::Result<Self> {
-        let file = create(name, |file| {
-            control(file, UI_SET_EVBIT, EV_KEY.into())?;
+        let file = create(name, Id::VIRTUAL, |file| {
+            keys(file, [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE])?;
             control(file, UI_SET_EVBIT, EV_REL.into())?;
-            for button in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE] {
-                control(file, UI_SET_KEYBIT, button.into())?;
-            }
             for axis in [REL_X, REL_Y, REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES] {
                 control(file, UI_SET_RELBIT, axis.into())?;
             }
@@ -178,13 +222,7 @@ pub struct Keyboard {
 
 impl Keyboard {
     pub fn create(name: &str, codes: impl IntoIterator<Item = u16>) -> io::Result<Self> {
-        let file = create(name, |file| {
-            control(file, UI_SET_EVBIT, EV_KEY.into())?;
-            for code in codes {
-                control(file, UI_SET_KEYBIT, code.into())?;
-            }
-            Ok(())
-        })?;
+        let file = create(name, Id::VIRTUAL, |file| keys(file, codes))?;
         Ok(Keyboard { file })
     }
 
@@ -218,20 +256,13 @@ pub struct Pen {
 
 impl Pen {
     pub fn create(name: &str, width: f32, height: f32) -> io::Result<Self> {
-        let file = create(name, |file| {
-            control(file, UI_SET_EVBIT, EV_KEY.into())?;
+        let file = create(name, Id::VIRTUAL, |file| {
+            keys(file, [BTN_TOOL_PEN, BTN_TOUCH])?;
             control(file, UI_SET_EVBIT, EV_ABS.into())?;
-            control(file, UI_SET_PROPBIT, INPUT_PROP_POINTER.into())?;
-            for button in [BTN_TOOL_PEN, BTN_TOUCH] {
-                control(file, UI_SET_KEYBIT, button.into())?;
-            }
-            for (axis, millimetres) in [(ABS_X, width), (ABS_Y, height)] {
-                control(file, UI_SET_ABSBIT, axis.into())?;
+            properties(file, &[INPUT_PROP_POINTER])?;
+            for (code, millimetres) in [(ABS_X, width), (ABS_Y, height)] {
                 let resolution = (PEN_UNITS as f32 / millimetres.max(1.0)).round() as i32;
-                let setup = AbsSetup { code: axis, value: 0, minimum: 0, maximum: PEN_UNITS, fuzz: 0, flat: 0, resolution: resolution.max(1) };
-                if unsafe { libc::ioctl(file.as_raw_fd(), UI_ABS_SETUP, &setup) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                axis(file, code, 0, PEN_UNITS, resolution.max(1))?;
             }
             Ok(())
         })?;

@@ -28,7 +28,7 @@ pub(crate) struct Patterns {
 }
 
 impl Patterns {
-    pub fn new(config: &Config, surface: Surface) -> Self {
+    pub fn new(config: &Config, surface: Surface, knock: bool) -> Self {
         let mut list = Vec::new();
         if config.corners.enabled {
             for corner in Corner::ALL {
@@ -41,7 +41,7 @@ impl Patterns {
                 }
             }
         }
-        if config.knock.enabled {
+        if knock && config.knock.enabled {
             for (code, action) in &config.knock.codes {
                 list.push(Pattern { zones: code.iter().map(|quadrant| Zone::Quadrant(*quadrant)).collect(), action: *action });
             }

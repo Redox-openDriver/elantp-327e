@@ -1,0 +1,4 @@
+type = process
+command = /usr/local/bin/elantpd
+restart = true
+smooth-recovery = true

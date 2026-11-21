@@ -276,6 +276,11 @@ struct Tally {
     keys: usize,
     notices: usize,
     pens: usize,
+    handed: usize,
+    touched: usize,
+    hidden: usize,
+    presses: usize,
+    passed: usize,
 }
 
 struct Replay<'a> {
@@ -332,6 +337,10 @@ impl Replay<'_> {
                     None
                 }
                 Event::PenAway => None,
+                Event::Touch { fingers, .. } => {
+                    self.tally.handed += 1;
+                    Some(Msg::new("dev-gesture-touch").num("fingers", fingers))
+                }
                 Event::Notice(notice) => {
                     self.tally.notices += 1;
                     Some(elantp_linux::notice(engine, notice))
@@ -347,11 +356,12 @@ impl Replay<'_> {
 }
 
 fn gestures(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
-    let (mut quiet, mut settings, mut recording) = (false, None, None);
+    let (mut quiet, mut native, mut settings, mut recording) = (false, false, None, None);
     let mut rest = options.iter();
     while let Some(option) = rest.next() {
         match *option {
             "--summary" => quiet = true,
+            "--native" => native = true,
             "--config" => settings = Some(PathBuf::from(rest.next().copied().unwrap_or_default())),
             other if !other.starts_with("--") && recording.is_none() => recording = Some(PathBuf::from(other)),
             other => return Err(Fail::new("dev-bad-option").arg("value", other).into()),
@@ -371,6 +381,9 @@ fn gestures(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     let layout = layout(&recorded.descriptor)?;
     let mut assembler = Assembler::default();
     let mut engine = Gestures::with_symbols(loaded.config, surface(&layout), &loaded.symbols);
+    if native {
+        engine = engine.native();
+    }
     let mut replay = Replay { catalog, quiet, tally: Tally::default(), motion: (0.0, 0.0) };
     let mut ticks = 0usize;
     let mut catch_up = |engine: &mut Gestures, replay: &mut Replay, until: u64| {
@@ -381,11 +394,23 @@ fn gestures(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
         }
     };
     let mut last = 0u64;
+    let mut pressed = false;
     for (micros, bytes) in &recorded.reports {
         catch_up(&mut engine, &mut replay, micros.saturating_sub(1));
         last = *micros;
         let Some(frame) = layout.decode(bytes).ok().and_then(|report| assembler.push(report)) else { continue };
-        let events = engine.feed(&Input { time: *micros, button: frame.button, touches: touches(&layout, &frame) });
+        let present = touches(&layout, &frame);
+        let count = present.len();
+        let events = engine.feed(&Input { time: *micros, button: frame.button, touches: present });
+        if count > 0 {
+            replay.tally.touched += 1;
+            replay.tally.hidden += usize::from(engine.visible().len() < count);
+        }
+        if frame.button && !pressed {
+            replay.tally.presses += 1;
+            replay.tally.passed += usize::from(!engine.hidden());
+        }
+        pressed = frame.button;
         replay.record(&engine, *micros, events);
     }
     catch_up(&mut engine, &mut replay, last.saturating_add(REPLAY_TAIL));
@@ -404,6 +429,15 @@ fn gestures(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
                 .num("swipes", tally.swipes)
         )
     );
+    if native {
+        let native = Msg::new("dev-gesture-native")
+            .num("frames", tally.touched)
+            .num("hidden", tally.hidden)
+            .num("handed", tally.handed)
+            .num("presses", tally.presses)
+            .num("passed", tally.passed);
+        println!("{}", catalog.render(&native));
+    }
     if tally.keys + tally.notices + tally.pens > 0 {
         println!("{}", catalog.render(&Msg::new("dev-gesture-extras").num("keys", tally.keys).num("notices", tally.notices).num("pens", tally.pens)));
     }
@@ -741,7 +775,7 @@ impl Outputs {
                     }
                 }
                 Event::Notice(notice) => println!("{}", catalog.render(&elantp_linux::notice(engine, notice))),
-                Event::Swipe { .. } => {}
+                Event::Swipe { .. } | Event::Touch { .. } => {}
             }
         }
         Ok(())

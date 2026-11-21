@@ -15,3 +15,7 @@ gestus = { path = "../gestus", features = ["config"] }
 [[bin]]
 name = "elantp-dev"
 path = "src/bin/elantp-dev.rs"
+
+[[bin]]
+name = "elantpd"
+path = "src/bin/elantpd.rs"

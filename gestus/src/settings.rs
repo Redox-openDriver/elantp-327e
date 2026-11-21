@@ -574,6 +574,21 @@ pub struct Config {
     pub typing: Typing,
 }
 
+impl Config {
+    pub fn native_extras(&self) -> bool {
+        self.corners.enabled
+            || self.rails.enabled
+            || self.circular.enabled
+            || self.edge_swipes.enabled
+            || self.joystick.enabled
+            || self.cover.enabled
+            || self.shake.enabled
+            || self.dwell.enabled
+            || self.smoothing.enabled
+            || self.edge_motion.enabled
+    }
+}
+
 impl From<Settings> for Config {
     fn from(pointer: Settings) -> Self {
         Config { pointer, ..Config::default() }

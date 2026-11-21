@@ -80,5 +80,6 @@ pub enum Event {
     Key { key: Key, pressed: bool },
     Pen { x: f32, y: f32, down: bool },
     PenAway,
+    Touch { fingers: u8, x: f32, y: f32 },
     Notice(Notice),
 }

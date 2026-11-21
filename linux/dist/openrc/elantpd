@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+
+description="elantp touchpad service (ELAN 04F3:327E)"
+command="/usr/local/bin/elantpd"
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=0
+
+depend() {
+	need localmount
+	after udev udev-trigger
+}

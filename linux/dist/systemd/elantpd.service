@@ -1,0 +1,49 @@
+[Unit]
+Description=elantp touchpad service (ELAN 04F3:327E)
+Documentation=file:///usr/local/share/doc/elantp/README.md
+After=systemd-udevd.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/elantpd
+Restart=on-failure
+RestartSec=2
+
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=16
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateIPC=yes
+DevicePolicy=closed
+DeviceAllow=/dev/uinput rw
+DeviceAllow=char-hidraw r
+DeviceAllow=char-input r
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

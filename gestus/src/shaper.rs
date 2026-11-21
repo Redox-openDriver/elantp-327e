@@ -47,7 +47,7 @@ impl Shaper {
                 (x != 0 || y != 0).then_some(Output::Wheel { x, y })
             }
             Event::Key { key, pressed } => Some(Output::Key { key, pressed }),
-            Event::Swipe { .. } | Event::Pen { .. } | Event::PenAway | Event::Notice(_) => None,
+            Event::Swipe { .. } | Event::Pen { .. } | Event::PenAway | Event::Touch { .. } | Event::Notice(_) => None,
         }
     }
 }

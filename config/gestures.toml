@@ -27,6 +27,7 @@ hold = "tablet"
 
 [corners.top-right]
 hold = "numpad"
+double-tap = "draw"
 
 [knock]
 enabled = false

@@ -5,6 +5,8 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::evdev::bit;
+
 const SYSFS: &str = "/sys/class/input";
 const EV_KEY: usize = 1;
 const EVENT: usize = 24;
@@ -12,11 +14,6 @@ const BATCH: usize = 64;
 const LETTERS: [usize; 3] = [30, 44, 57];
 const MODIFIERS: [u16; 9] = [29, 97, 42, 54, 56, 100, 125, 126, 464];
 const OURS: &str = "elantp";
-
-pub fn bit(map: &str, index: usize) -> bool {
-    let words: Option<Vec<u64>> = map.split_whitespace().rev().map(|word| u64::from_str_radix(word, 16).ok()).collect();
-    words.and_then(|words| words.get(index / 64).copied()).is_some_and(|word| word >> (index % 64) & 1 == 1)
-}
 
 pub fn is_keyboard(events: &str, keys: &str) -> bool {
     bit(events, EV_KEY) && LETTERS.iter().all(|key| bit(keys, *key))
@@ -140,7 +137,7 @@ mod tests {
         assert!(!is_keyboard("1b", "e520 10000 0 0 0 0"));
         assert!(!is_keyboard("1f", "3f00733fff 0 0 483ffff17aff32d bfd4444600000000 1 130ff38b17d000 677bfad9415fed 19ed68000004400 10000002"));
         assert!(!is_keyboard("13", "400040000000000 40000001c0000 0 6000000000000000 100000000000 0 181000800100c00 400000000300400 0 2"));
-        assert!(!is_keyboard("", "") && !bit("zz", 0));
+        assert!(!is_keyboard("", ""));
     }
 
     #[test]
