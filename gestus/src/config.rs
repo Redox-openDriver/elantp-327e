@@ -6,12 +6,16 @@ use core::fmt;
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::keys::{Action, Combo, Slider};
 use crate::settings::Config;
 use crate::symbols::Template;
 use crate::zones::Corner;
 
+pub const LIMIT: u64 = 1024 * 1024;
+pub const SYMBOLS: &str = "symbols.toml";
 const MAX_GRID: usize = 8;
 const MAX_KNOCK: usize = 8;
 const MAX_NAME: usize = 32;
@@ -33,6 +37,40 @@ fn problem(text: &str, error: &toml::de::Error) -> Problem {
 
 pub fn parse(text: &str) -> Result<Config, Problem> {
     toml::from_str(text).map_err(|e| problem(text, &e))
+}
+
+#[derive(Debug)]
+pub enum LoadError {
+    Unreadable(PathBuf, std::io::Error),
+    TooBig(PathBuf),
+    Invalid(PathBuf, Problem),
+}
+
+fn read(path: &Path) -> Result<String, LoadError> {
+    let unreadable = |error| LoadError::Unreadable(path.to_path_buf(), error);
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut text = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut text).map_err(unreadable)?;
+    if text.len() as u64 > LIMIT {
+        return Err(LoadError::TooBig(path.to_path_buf()));
+    }
+    Ok(text)
+}
+
+pub fn symbols_beside(path: &Path) -> PathBuf {
+    path.with_file_name(SYMBOLS)
+}
+
+pub fn load_symbols(path: &Path) -> Result<Vec<Template>, LoadError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    templates(&read(path)?).map_err(|problem| LoadError::Invalid(path.to_path_buf(), problem))
+}
+
+pub fn load(path: &Path) -> Result<(Config, Vec<Template>), LoadError> {
+    let config = parse(&read(path)?).map_err(|problem| LoadError::Invalid(path.to_path_buf(), problem))?;
+    Ok((config, load_symbols(&symbols_beside(path))?))
 }
 
 pub fn millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
@@ -269,6 +307,25 @@ mod tests {
     fn the_example_configuration_is_valid() {
         let config = parse(include_str!("../../config/gestures.toml")).unwrap();
         assert!(config.inertia.enabled);
+    }
+
+    #[test]
+    fn the_settings_and_the_learned_symbols_beside_them_are_read_together() {
+        let dir = std::env::temp_dir().join(alloc::format!("gestus-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gestures.toml");
+        std::fs::write(&path, "[inertia]\nenabled = true\n").unwrap();
+        let (config, symbols) = load(&path).unwrap();
+        assert!(config.inertia.enabled && symbols.is_empty());
+        let saw = Template { name: String::from("saw"), points: alloc::vec![(0.0, 0.0), (1.0, 1.0)] };
+        std::fs::write(symbols_beside(&path), entry(&saw).unwrap()).unwrap();
+        assert_eq!(load(&path).unwrap().1, [saw]);
+        std::fs::write(&path, "[inertia]\nenabled = 1\n").unwrap();
+        assert!(matches!(load(&path), Err(LoadError::Invalid(_, Problem { line: 2, .. }))));
+        std::fs::write(&path, alloc::vec![b' '; LIMIT as usize + 2]).unwrap();
+        assert!(matches!(load(&path), Err(LoadError::TooBig(_))));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(load(&path), Err(LoadError::Unreadable(..))));
     }
 
     #[test]

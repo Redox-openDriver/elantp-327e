@@ -1,6 +1,8 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(feature = "config")]
+extern crate std;
 
 #[cfg(feature = "config")]
 pub mod config;
@@ -68,6 +70,23 @@ pub enum Notice {
     Symbol(u16),
     Unrecognized,
     Cancelled,
+}
+
+impl Notice {
+    pub fn key(self) -> &'static str {
+        match self {
+            Notice::Touchpad(true) => "gesture-touchpad-on",
+            Notice::Touchpad(false) => "gesture-touchpad-off",
+            Notice::Numpad(true) => "gesture-numpad-on",
+            Notice::Numpad(false) => "gesture-numpad-off",
+            Notice::Tablet(true) => "gesture-tablet-on",
+            Notice::Tablet(false) => "gesture-tablet-off",
+            Notice::Drawing => "gesture-drawing",
+            Notice::Symbol(_) => "gesture-symbol",
+            Notice::Unrecognized => "gesture-unrecognized",
+            Notice::Cancelled => "gesture-cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

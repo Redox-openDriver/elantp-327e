@@ -138,14 +138,33 @@ impl Encoder {
         out
     }
 
-    pub fn tap(&mut self, base: &[Contact], fingers: u8, x: i32, y: i32, spread: i32) -> Vec<Wire> {
+    pub fn shown(&self) -> Vec<Contact> {
+        self.slots.iter().flatten().copied().collect()
+    }
+
+    pub fn tap(&mut self, points: &[(i32, i32)]) -> Vec<Wire> {
+        let base = self.shown();
+        if points.is_empty() || base.len() + points.len() > self.slots.len() {
+            return Vec::new();
+        }
         let button = self.button;
-        let mut touched = base.to_vec();
-        touched.extend((0..fingers.max(1)).map(|i| Contact { id: SYNTHETIC.saturating_add(i), x: x + i32::from(i) * spread, y, palm: false }));
+        let mut touched = base.clone();
+        touched.extend(points.iter().zip(SYNTHETIC..).map(|((x, y), id)| Contact { id, x: *x, y: *y, palm: false }));
         let mut out = self.frame(&touched, button);
-        out.extend(self.frame(base, button));
+        out.extend(self.frame(&base, button));
         out
     }
+}
+
+fn spread(axis: &Axis, x: i32, fingers: u8, step: i32) -> Vec<i32> {
+    let (low, high) = (axis.logical_min as i32, axis.logical_max as i32);
+    let rightward = x + step * i32::from(fingers.max(1) - 1) <= high;
+    (0..fingers.max(1))
+        .map(|i| {
+            let offset = step * i32::from(i);
+            (if rightward { x + offset } else { x - offset }).clamp(low, high)
+        })
+        .collect()
 }
 
 fn logical(axis: &Axis, millimetres: f32) -> i32 {
@@ -190,9 +209,11 @@ impl Touchpad {
         uinput::write(&mut self.file, &events)
     }
 
-    pub fn tap(&mut self, touches: &[Touch], fingers: u8, x: f32, y: f32) -> io::Result<()> {
-        let spread = (SPREAD * self.x.units_per_millimetre()).round() as i32;
-        let events = self.encoder.tap(&self.contacts(touches), fingers, logical(&self.x, x), logical(&self.y, y), spread);
+    pub fn replay(&mut self, fingers: u8, x: f32, y: f32) -> io::Result<()> {
+        let step = (SPREAD * self.x.units_per_millimetre()).round() as i32;
+        let row = logical(&self.y, y);
+        let points: Vec<(i32, i32)> = spread(&self.x, logical(&self.x, x), fingers, step).into_iter().map(|x| (x, row)).collect();
+        let events = self.encoder.tap(&points);
         uinput::write(&mut self.file, &events)
     }
 }
@@ -280,13 +301,28 @@ mod tests {
     fn a_replayed_tap_comes_and_goes_beside_the_fingers_already_shown() {
         let mut encoder = Encoder::new(5);
         encoder.frame(&[at(1, 50, 50)], false);
-        let events = encoder.tap(&[at(1, 50, 50)], 2, 300, 100, 40);
+        let events = encoder.tap(&[(300, 100), (340, 100)]);
         let ids: Vec<i32> = events.iter().filter(|(_, code, _)| *code == ABS_MT_TRACKING_ID).map(|(_, _, value)| *value).collect();
         assert_eq!(ids, [2, 3, -1, -1]);
         assert!(events.contains(&(EV_ABS, ABS_MT_POSITION_X, 340)));
         assert!(events.contains(&(EV_KEY, BTN_TOOL_TRIPLETAP, 1)) && events.contains(&(EV_KEY, BTN_TOOL_FINGER, 1)));
         assert_eq!(events.iter().filter(|event| **event == (EV_SYN, SYN_REPORT, 0)).count(), 2);
         assert!(encoder.frame(&[at(1, 50, 50)], false).is_empty());
+    }
+
+    #[test]
+    fn a_replay_is_built_from_what_the_system_already_sees_and_fits_on_the_pad() {
+        let mut encoder = Encoder::new(3);
+        encoder.frame(&[at(1, 50, 50), at(2, 60, 60)], false);
+        assert!(encoder.tap(&[(10, 10), (20, 10)]).is_empty());
+        assert_eq!(encoder.shown(), [at(1, 50, 50), at(2, 60, 60)]);
+        assert!(!encoder.tap(&[(10, 10)]).is_empty());
+        assert!(encoder.tap(&[]).is_empty());
+        let axis = Axis { logical_min: 0, logical_max: 3000, micrometres: 120_000 };
+        assert_eq!(spread(&axis, 1000, 3, 375), [1000, 1375, 1750]);
+        assert_eq!(spread(&axis, 2800, 3, 375), [2800, 2425, 2050]);
+        assert_eq!(spread(&axis, 100, 1, 375), [100]);
+        assert_eq!(spread(&axis, 2900, 9, 375).iter().copied().min(), Some(0));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use drv_i18n::{Catalog, Fail, Msg, as_msg};
+use elantp_core::alarm::Alarm;
 use elantp_core::amdgpio;
 use elantp_core::designware::Master;
 use elantp_core::pad::{Pad, RESET_PATIENCE, State};
@@ -32,6 +33,13 @@ fn arm_in(timer: &libredox::Fd, lasting: Duration) -> Result<(), BoxError> {
     at.tv_sec += i64::try_from(nanos / NANOS_IN_SECOND).unwrap_or(i64::MAX);
     at.tv_nsec = i32::try_from(nanos % NANOS_IN_SECOND).unwrap_or(0);
     timer.write(&at)?;
+    Ok(())
+}
+
+fn want(alarm: &mut Alarm, timer: &libredox::Fd, wake: u64, now: u64) -> Result<(), BoxError> {
+    if alarm.schedule(wake) {
+        arm_in(timer, Duration::from_micros(wake.saturating_sub(now)))?;
+    }
     Ok(())
 }
 
@@ -120,7 +128,7 @@ impl Desk<'_> {
 }
 
 fn load_settings(catalog: &Catalog) -> (Config, Vec<Template>) {
-    match elantp_redox::settings(Path::new(elantp_redox::SETTINGS), Path::new(elantp_redox::SYMBOLS)) {
+    match elantp_redox::settings(Path::new(elantp_redox::SETTINGS)) {
         Ok(Some(found)) => {
             say(catalog, &Msg::new("redox-settings-used").arg("file", elantp_redox::SETTINGS));
             found
@@ -162,8 +170,7 @@ fn run(catalog: &Catalog) -> Result<(), BoxError> {
     let events = RawEventQueue::new()?;
     events.subscribe(irq.raw(), ON_IRQ, EventFlags::READ)?;
     events.subscribe(timer.raw(), ON_TIMER, EventFlags::READ)?;
-    arm_in(&timer, Duration::from_micros(RESET_PATIENCE))?;
-    let mut armed: Option<u64> = None;
+    let mut alarm = Alarm::default();
     let (width, height) = pad.layout.size();
     let (config, learned) = load_settings(catalog);
     let mut desk = Desk {
@@ -176,6 +183,7 @@ fn run(catalog: &Catalog) -> Result<(), BoxError> {
         unsupported: BTreeSet::new(),
     };
     say(catalog, &Msg::new("redox-started").arg("address", format!("{:#04x}", resources.address)).num("pin", resources.pin).num("irq", resources.irq));
+    want(&mut alarm, &timer, RESET_PATIENCE, desk.now())?;
     for event in events {
         let event = event?;
         match event.user_data {
@@ -201,7 +209,7 @@ fn run(catalog: &Catalog) -> Result<(), BoxError> {
             ON_TIMER => {
                 let mut now = TimeSpec::default();
                 timer.read(&mut now)?;
-                armed = None;
+                alarm.fired(desk.now());
                 pad.tick(desk.now()).map_err(|e| Fail::new("redox-pad-failed").arg("detail", format!("{e:?}")))?;
                 desk.tick()?;
             }
@@ -211,11 +219,8 @@ fn run(catalog: &Catalog) -> Result<(), BoxError> {
             State::Resetting { since } => Some(since.saturating_add(RESET_PATIENCE)),
             State::Running => None,
         };
-        if let Some(wake) = [reset, desk.gestures.deadline()].into_iter().flatten().min()
-            && armed != Some(wake)
-        {
-            arm_in(&timer, Duration::from_micros(wake.saturating_sub(desk.now())))?;
-            armed = Some(wake);
+        if let Some(wake) = [reset, desk.gestures.deadline()].into_iter().flatten().min() {
+            want(&mut alarm, &timer, wake, desk.now())?;
         }
     }
     Ok(())

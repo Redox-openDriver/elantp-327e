@@ -14,15 +14,15 @@ use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
 use elantp_linux::keyboard::{self, Keyboards};
+use elantp_linux::output::{Devices, surface, touches};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
-use elantp_linux::{evdev, keys, recording, uinput};
+use elantp_linux::{evdev, recording};
 use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
 const POLL: Duration = Duration::from_millis(100);
 const RELOAD: Duration = Duration::from_secs(1);
-const SCROLL_PER_NOTCH: f32 = 30.0;
 const REPLAY_TAIL: u64 = 10_000_000;
 const TICK_LIMIT: usize = 1_000_000;
 const LEARN_TIMES: usize = 3;
@@ -234,21 +234,6 @@ fn show(catalog: &Catalog, path: &Path) -> Result<(), BoxError> {
     }
     println!("{}", catalog.render(&Msg::new("dev-shown").num("frames", frames).num("skipped", skipped)));
     Ok(())
-}
-
-fn touches(layout: &Layout, frame: &Frame) -> Vec<Touch> {
-    let millimetres =
-        |axis: &Axis, value: i64| ((value - axis.logical_min) as f64 * axis.micrometres as f64 / 1000.0 / (axis.logical_max - axis.logical_min) as f64) as f32;
-    frame
-        .contacts
-        .iter()
-        .filter(|contact| contact.tip)
-        .map(|contact| Touch { id: contact.id, x: millimetres(&layout.x, contact.x), y: millimetres(&layout.y, contact.y), palm: !contact.confident })
-        .collect()
-}
-
-fn surface(layout: &Layout) -> Surface {
-    Surface { width: layout.x.micrometres as f32 / 1000.0, height: layout.y.micrometres as f32 / 1000.0 }
 }
 
 fn button_key(button: Button) -> &'static str {
@@ -711,88 +696,17 @@ fn run_session(catalog: &Catalog, dir: Option<PathBuf>, only: &[&str]) -> Result
     Ok(())
 }
 
-fn button_code(button: Button) -> u16 {
-    match button {
-        Button::Left => uinput::BTN_LEFT,
-        Button::Right => uinput::BTN_RIGHT,
-        Button::Middle => uinput::BTN_MIDDLE,
-    }
-}
-
 fn micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-struct Outputs {
-    pointer: uinput::Pointer,
-    keyboard: uinput::Keyboard,
-    pen: Option<uinput::Pen>,
-    pen_failed: bool,
-    surface: Surface,
-}
-
-impl Outputs {
-    fn create(surface: Surface) -> Result<Self, BoxError> {
-        let failed = |e: std::io::Error| Fail::new("dev-uinput-failed").arg("detail", e);
-        Ok(Outputs {
-            pointer: uinput::Pointer::create("elantp gestus").map_err(failed)?,
-            keyboard: uinput::Keyboard::create("elantp gestus keys", gestus::Key::ALL.iter().map(|key| keys::code(*key))).map_err(failed)?,
-            pen: None,
-            pen_failed: false,
-            surface,
-        })
+fn deliver(catalog: &Catalog, outputs: &mut Devices, engine: &Gestures, events: Vec<Event>) -> Result<(), BoxError> {
+    for event in events {
+        if let Some(Event::Notice(notice)) = outputs.send(event)? {
+            println!("{}", catalog.render(&elantp_linux::notice(engine, notice)));
+        }
     }
-
-    fn pen(&mut self, catalog: &Catalog) -> Option<&mut uinput::Pen> {
-        if self.pen.is_none() && !self.pen_failed {
-            match uinput::Pen::create("elantp gestus pen", self.surface.width, self.surface.height) {
-                Ok(pen) => self.pen = Some(pen),
-                Err(e) => {
-                    self.pen_failed = true;
-                    eprintln!("{}", catalog.render(&Msg::new("dev-pen-failed").arg("detail", e)));
-                }
-            }
-        }
-        self.pen.as_mut()
-    }
-
-    fn deliver(&mut self, catalog: &Catalog, engine: &Gestures, events: Vec<Event>) -> Result<(), BoxError> {
-        for event in events {
-            match event {
-                Event::Motion { dx, dy } => self.pointer.motion(dx, dy)?,
-                Event::Press(button) => self.pointer.button(button_code(button), true)?,
-                Event::Release(button) => self.pointer.button(button_code(button), false)?,
-                Event::Scroll { dx, dy } => self.pointer.scroll(dx, dy, SCROLL_PER_NOTCH)?,
-                Event::Key { key, pressed } => self.keyboard.key(keys::code(key), pressed)?,
-                Event::Pen { x, y, down } => {
-                    if let Some(pen) = self.pen(catalog) {
-                        pen.place(x, y, down)?;
-                    }
-                }
-                Event::PenAway => {
-                    if let Some(pen) = self.pen.as_mut() {
-                        pen.away()?;
-                    }
-                }
-                Event::Notice(notice) => println!("{}", catalog.render(&elantp_linux::notice(engine, notice))),
-                Event::Swipe { .. } | Event::Touch { .. } => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn let_go(&mut self) -> Result<(), BoxError> {
-        for button in [Button::Left, Button::Right, Button::Middle] {
-            self.pointer.button(button_code(button), false)?;
-        }
-        for key in keys::HELD {
-            self.keyboard.key(keys::code(key), false)?;
-        }
-        if let Some(pen) = self.pen.as_mut() {
-            pen.away()?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -849,12 +763,13 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     let device = open(&found)?;
     let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
     let surface = surface(&layout);
-    let mut outputs = Outputs::create(surface)?;
+    let mut outputs = Devices::create(surface, loaded.config.tablet.enabled).map_err(|e| Fail::new("dev-uinput-failed").arg("detail", e))?;
     let grab = evdev::grab(&nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
     catch_interrupt();
     println!("{}", catalog.text("dev-drive-start"));
     let mut engine = build(&loaded, tweaks, surface);
     let mut keyboards = Keyboards::default();
+    let mut typing = loaded.config.typing.enabled;
     watch_typing(catalog, &mut keyboards, &loaded);
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
@@ -878,16 +793,19 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
                 }
                 let Some(frame) = layout.decode(&buffer[..length]).ok().and_then(|report| assembler.push(report)) else { continue };
                 let events = engine.feed(&Input { time: micros(started), button: frame.button, touches: touches(&layout, &frame) });
-                outputs.deliver(catalog, &engine, events)?;
+                deliver(catalog, &mut outputs, &engine, events)?;
             }
         }
         let now = micros(started);
         if engine.deadline().is_some_and(|at| at <= now) {
             let events = engine.tick(now);
-            outputs.deliver(catalog, &engine, events)?;
+            deliver(catalog, &mut outputs, &engine, events)?;
         }
         if checked.elapsed() >= RELOAD {
             checked = Instant::now();
+            if typing {
+                keyboards.refresh();
+            }
             let fresh = config::stamp(&path);
             if fresh != stamp {
                 stamp = fresh;
@@ -895,7 +813,9 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
                 match reloaded {
                     Ok(loaded) => {
                         outputs.let_go()?;
+                        outputs.tablet(loaded.config.tablet.enabled)?;
                         engine = build(&loaded, tweaks, surface);
+                        typing = loaded.config.typing.enabled;
                         watch_typing(catalog, &mut keyboards, &loaded);
                         println!("{}", catalog.render(&Msg::new("dev-config-reloaded").arg("file", path.display())));
                     }
@@ -984,7 +904,7 @@ fn learn(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     } else {
         String::new()
     };
-    gestus::config::templates(&text).map_err(|problem| config::invalid(&target, problem))?;
+    gestus::config::templates(&text).map_err(|problem| config::failure(gestus::config::LoadError::Invalid(target.clone(), problem)))?;
     for points in samples {
         let template = gestus::Template { name: name.clone(), points };
         if let Some(entry) = gestus::config::entry(&template) {

@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use drv_i18n::{Catalog, Msg};
 
-const SOURCES: [&str; 7] = [
+const SOURCES: [&str; 8] = [
+    include_str!("../../gestus/src/lib.rs"),
     include_str!("../src/bin/elantp-dev.rs"),
     include_str!("../src/bin/elantpd.rs"),
     include_str!("../src/lib.rs"),

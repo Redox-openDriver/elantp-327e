@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
@@ -9,6 +8,7 @@ use elantp_core::aml::{self, Value};
 use elantp_core::designware::{I2cError, Master};
 use elantp_core::hw::{Clock, Registers};
 use elantp_core::pad::Bus;
+use gestus::config::{LIMIT, LoadError};
 use gestus::{Config, Gestures, Key, Notice, Template};
 
 pub const LOCALES: [(&str, &str); 2] = [("ru", include_str!("../../locales/ru.ftl")), ("en", include_str!("../../locales/en.ftl"))];
@@ -20,8 +20,6 @@ pub const CONTROLLER: &str = "_SB.I2CA";
 pub const GPIO: &str = "_SB.GPIO";
 const PAYLOAD: usize = 64 * 1024;
 pub const SETTINGS: &str = "/etc/elantp/gestures.toml";
-pub const SYMBOLS: &str = "/etc/elantp/symbols.toml";
-const SETTINGS_LIMIT: u64 = 1024 * 1024;
 pub const ABSOLUTE: f32 = 65535.0;
 
 pub fn catalog() -> Catalog {
@@ -170,42 +168,26 @@ impl Bus for PadBus {
     }
 }
 
-fn read_limited(path: &Path) -> Result<String, Fail> {
-    let unreadable = |detail: String| Fail::new("redox-settings-unreadable").arg("file", path.display()).arg("detail", detail);
-    let file = std::fs::File::open(path).map_err(|e| unreadable(e.to_string()))?;
-    let mut text = String::new();
-    file.take(SETTINGS_LIMIT + 1).read_to_string(&mut text).map_err(|e| unreadable(e.to_string()))?;
-    if text.len() as u64 > SETTINGS_LIMIT {
-        return Err(unreadable(format!("> {SETTINGS_LIMIT}")));
-    }
-    Ok(text)
-}
-
-fn invalid(path: &Path, problem: gestus::config::Problem) -> Fail {
-    Fail::new("redox-settings-invalid").arg("file", path.display()).num("line", problem.line).num("column", problem.column).arg("detail", problem.message)
-}
-
-pub fn settings(path: &Path, symbols: &Path) -> Result<Option<(Config, Vec<Template>)>, Fail> {
+pub fn settings(path: &Path) -> Result<Option<(Config, Vec<Template>)>, Fail> {
     if !path.exists() {
         return Ok(None);
     }
-    let config = gestus::config::parse(&read_limited(path)?).map_err(|problem| invalid(path, problem))?;
-    let learned = if symbols.exists() { gestus::config::templates(&read_limited(symbols)?).map_err(|problem| invalid(symbols, problem))? } else { Vec::new() };
-    Ok(Some((config, learned)))
+    gestus::config::load(path).map(Some).map_err(|error| match error {
+        LoadError::Unreadable(path, error) => Fail::new("redox-settings-unreadable").arg("file", path.display()).arg("detail", error),
+        LoadError::TooBig(path) => Fail::new("redox-settings-too-big").arg("file", path.display()).num("limit", LIMIT),
+        LoadError::Invalid(path, problem) => Fail::new("redox-settings-invalid")
+            .arg("file", path.display())
+            .num("line", problem.line)
+            .num("column", problem.column)
+            .arg("detail", problem.message),
+    })
 }
 
 pub fn notice(gestures: &Gestures, notice: Notice) -> Msg {
+    let message = Msg::new(notice.key());
     match notice {
-        Notice::Touchpad(true) => Msg::new("gesture-touchpad-on"),
-        Notice::Touchpad(false) => Msg::new("gesture-touchpad-off"),
-        Notice::Numpad(true) => Msg::new("gesture-numpad-on"),
-        Notice::Numpad(false) => Msg::new("gesture-numpad-off"),
-        Notice::Tablet(true) => Msg::new("gesture-tablet-on"),
-        Notice::Tablet(false) => Msg::new("gesture-tablet-off"),
-        Notice::Drawing => Msg::new("gesture-drawing"),
-        Notice::Symbol(index) => Msg::new("gesture-symbol").arg("name", gestures.symbol(index).unwrap_or_default()),
-        Notice::Unrecognized => Msg::new("gesture-unrecognized"),
-        Notice::Cancelled => Msg::new("gesture-cancelled"),
+        Notice::Symbol(index) => message.arg("name", gestures.symbol(index).unwrap_or_default()),
+        _ => message,
     }
 }
 

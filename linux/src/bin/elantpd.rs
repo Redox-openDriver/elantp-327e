@@ -6,13 +6,13 @@ use std::time::{Duration, Instant, SystemTime};
 use drv_i18n::{Catalog, Fail, Msg, as_msg};
 use elantp_core::identity;
 use elantp_core::report::ReportDescriptor;
-use elantp_core::touchpad::{Assembler, Axis, Frame, Layout};
+use elantp_core::touchpad::{Assembler, Layout};
 use elantp_linux::clone::Touchpad;
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::evdev::{self, Grab};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
-use elantp_linux::{keys, uinput};
-use gestus::{Button, Event, Gestures, Input, Surface, Touch};
+use elantp_linux::output::{Devices, surface, touches};
+use gestus::{Event, Gestures, Input, Surface};
 
 type BoxError = Box<dyn std::error::Error>;
 type Stamp = Option<(SystemTime, Option<SystemTime>)>;
@@ -20,7 +20,6 @@ type Stamp = Option<(SystemTime, Option<SystemTime>)>;
 const POLL: Duration = Duration::from_millis(100);
 const RELOAD: Duration = Duration::from_secs(1);
 const RETRY: Duration = Duration::from_secs(2);
-const SCROLL_PER_NOTCH: f32 = 30.0;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -58,68 +57,19 @@ fn settings(catalog: &Catalog, path: &Path) -> Result<Loaded, Fail> {
     Ok(loaded)
 }
 
-fn button_code(button: Button) -> u16 {
-    match button {
-        Button::Left => uinput::BTN_LEFT,
-        Button::Right => uinput::BTN_RIGHT,
-        Button::Middle => uinput::BTN_MIDDLE,
-    }
-}
-
-fn millimetres(axis: &Axis, value: i64) -> f32 {
-    ((value - axis.logical_min) as f64 * axis.micrometres as f64 / 1000.0 / (axis.logical_max - axis.logical_min) as f64) as f32
-}
-
-fn touches(layout: &Layout, frame: &Frame) -> Vec<Touch> {
-    frame
-        .contacts
-        .iter()
-        .filter(|contact| contact.tip)
-        .map(|contact| Touch { id: contact.id, x: millimetres(&layout.x, contact.x), y: millimetres(&layout.y, contact.y), palm: !contact.confident })
-        .collect()
-}
-
 struct Outputs {
     touchpad: Touchpad,
-    pointer: uinput::Pointer,
-    keyboard: uinput::Keyboard,
-    pen: Option<uinput::Pen>,
-    pen_failed: bool,
-    surface: Surface,
+    devices: Devices,
     button: bool,
 }
 
 impl Outputs {
     fn deliver(&mut self, catalog: &Catalog, engine: &Gestures, events: Vec<Event>) -> Result<(), BoxError> {
         for event in events {
-            match event {
-                Event::Motion { dx, dy } => self.pointer.motion(dx, dy)?,
-                Event::Press(button) => self.pointer.button(button_code(button), true)?,
-                Event::Release(button) => self.pointer.button(button_code(button), false)?,
-                Event::Scroll { dx, dy } => self.pointer.scroll(dx, dy, SCROLL_PER_NOTCH)?,
-                Event::Key { key, pressed } => self.keyboard.key(keys::code(key), pressed)?,
-                Event::Touch { fingers, x, y } => self.touchpad.tap(&engine.visible(), fingers, x, y)?,
-                Event::Pen { x, y, down } => {
-                    if self.pen.is_none() && !self.pen_failed {
-                        match uinput::Pen::create("elantp gestus pen", self.surface.width, self.surface.height) {
-                            Ok(pen) => self.pen = Some(pen),
-                            Err(e) => {
-                                self.pen_failed = true;
-                                say(catalog, &Msg::new("service-error").arg("detail", e));
-                            }
-                        }
-                    }
-                    if let Some(pen) = self.pen.as_mut() {
-                        pen.place(x, y, down)?;
-                    }
-                }
-                Event::PenAway => {
-                    if let Some(pen) = self.pen.as_mut() {
-                        pen.away()?;
-                    }
-                }
-                Event::Notice(notice) => say(catalog, &elantp_linux::notice(engine, notice)),
-                Event::Swipe { .. } => {}
+            match self.devices.send(event)? {
+                Some(Event::Touch { fingers, x, y }) => self.touchpad.replay(fingers, x, y)?,
+                Some(Event::Notice(notice)) => say(catalog, &elantp_linux::notice(engine, notice)),
+                _ => {}
             }
         }
         Ok(())
@@ -131,16 +81,7 @@ impl Outputs {
     }
 
     fn let_go(&mut self) -> Result<(), BoxError> {
-        for button in [Button::Left, Button::Right, Button::Middle] {
-            self.pointer.button(button_code(button), false)?;
-        }
-        for key in keys::HELD {
-            self.keyboard.key(keys::code(key), false)?;
-        }
-        if let Some(pen) = self.pen.as_mut() {
-            pen.away()?;
-        }
-        Ok(())
+        Ok(self.devices.let_go()?)
     }
 }
 
@@ -174,15 +115,11 @@ fn build(loaded: &Loaded, surface: Surface) -> Gestures {
 
 fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> Result<Outcome, BoxError> {
     let Some(pad) = open_pad()? else { return Ok(Outcome::Foreign) };
-    let surface = Surface { width: pad.layout.x.micrometres as f32 / 1000.0, height: pad.layout.y.micrometres as f32 / 1000.0 };
+    let surface: Surface = surface(&pad.layout);
     let failed = |e: std::io::Error| Fail::new("dev-uinput-failed").arg("detail", e);
     let mut outputs = Outputs {
         touchpad: Touchpad::create(&pad.identity, &pad.layout.x, &pad.layout.y, pad.layout.slots.len()).map_err(failed)?,
-        pointer: uinput::Pointer::create("elantp gestus").map_err(failed)?,
-        keyboard: uinput::Keyboard::create("elantp gestus keys", gestus::Key::ALL.iter().map(|key| keys::code(*key))).map_err(failed)?,
-        pen: None,
-        pen_failed: false,
-        surface,
+        devices: Devices::create(surface, loaded.config.tablet.enabled).map_err(failed)?,
         button: false,
     };
     let grab: Grab = evdev::grab(&pad.nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
@@ -224,6 +161,7 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp) -> R
                     Ok(loaded) if !loaded.config.native_extras() => break Outcome::Idle,
                     Ok(loaded) => {
                         outputs.let_go()?;
+                        outputs.devices.tablet(loaded.config.tablet.enabled)?;
                         engine = build(&loaded, surface);
                         outputs.show(&engine)?;
                         say(catalog, &Msg::new("service-reloaded").arg("file", path.display()));

@@ -54,6 +54,12 @@ if [ -e "/etc/dinit.d/$name" ]; then
   as_root dinitctl disable "$name" 2>/dev/null || true
   as_root rm -f "/etc/dinit.d/$name"
 fi
+supervised=$(watched_by s6-svscan || true)
+if trusted_dir "$supervised" && [ -L "$supervised/$name" ]; then
+  as_root s6-svc -d "$supervised/$name" 2>/dev/null || true
+  as_root rm -f "$supervised/$name"
+  as_root s6-svscanctl -an "$supervised" 2>/dev/null || true
+fi
 as_root rm -rf /etc/elantp/s6
 if [ -d /run/systemd/system ]; then
   as_root systemctl daemon-reload
