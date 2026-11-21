@@ -56,4 +56,10 @@ mod tests {
         assert_eq!(fail.0.key, "dev-config-invalid");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn the_example_settings_shipped_with_the_driver_are_valid() {
+        let config = gestus::config::parse(include_str!("../../config/gestures.toml")).unwrap();
+        assert!(config.native_extras() && config.corners.enabled && config.symbols.enabled);
+    }
 }

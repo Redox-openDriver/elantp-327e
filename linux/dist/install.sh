@@ -102,6 +102,10 @@ as_root install -Dm755 "$built/elantp-dev" /usr/local/bin/elantp-dev
 as_root install -Dm644 README.md "$documents/README.md"
 as_root install -Dm644 docs/gestures.md "$documents/gestures.md"
 as_root install -Dm644 config/gestures.toml "$documents/gestures.toml"
+library=$(cargo metadata --format-version 1 --locked | tr ',' '\n' | sed -n 's|^"manifest_path":"\(.*/gestus[^/]*/[^/]*/Cargo.toml\)"$|\1|p' | head -n 1)
+if [ -n "$library" ] && [ -f "${library%/Cargo.toml}/docs/settings.md" ]; then
+  as_root install -Dm644 "${library%/Cargo.toml}/docs/settings.md" "$documents/settings.md"
+fi
 as_root install -d -m 0755 /etc/elantp
 
 services=/etc/sv

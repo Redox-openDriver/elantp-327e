@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "gestus", "linux"]
+members = ["core", "linux"]
 exclude = ["redox"]
 
 [workspace.package]

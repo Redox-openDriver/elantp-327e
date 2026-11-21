@@ -2,8 +2,7 @@ use std::collections::BTreeSet;
 
 use drv_i18n::{Catalog, Msg};
 
-const SOURCES: [&str; 8] = [
-    include_str!("../../gestus/src/lib.rs"),
+const SOURCES: [&str; 7] = [
     include_str!("../src/bin/elantp-dev.rs"),
     include_str!("../src/bin/elantpd.rs"),
     include_str!("../src/lib.rs"),
@@ -14,7 +13,7 @@ const SOURCES: [&str; 8] = [
 ];
 
 fn used() -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
+    let mut keys: BTreeSet<String> = gestus::Notice::KEYS.iter().map(|key| key.to_string()).collect();
     for source in SOURCES {
         for piece in source.split('"').skip(1).step_by(2) {
             if ["dev-", "session-", "redox-", "gesture-", "service-"].iter().any(|prefix| piece.starts_with(prefix))

@@ -93,4 +93,5 @@ requirements = ["acpid", "inputd"]
 readme = "README.md"
 security = "SECURITY.md"
 roadmap = "ROADMAP.md"
+gestures = "https://github.com/Redox-openDriver/gestus"
 messages = "https://github.com/Redox-openDriver/drv-i18n"
