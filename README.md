@@ -47,7 +47,7 @@ cargo build --release
 sudo target/release/elantp-dev drive
 ```
 Это режим разработки: курсором управляет наш движок целиком, как будет в Redox, и настройки окружения на него не
-действуют. Ctrl+C всё возвращает.
+действуют. Ctrl+C всё возвращает. Если служба уже держит тачпад, сначала останови её: `sudo systemctl stop elantpd`.
 `--natural` — естественная прокрутка, `--speed 0.7` — медленнее, `--config config/gestures.toml` — с новыми жестами;
 файл перечитывается на ходу, как только его сохранишь. `sudo target/release/elantp-dev learn spiral --file
 config/symbols.toml` — выучить свой символ. `sudo target/release/elantp-dev session` — записать свои

@@ -1,0 +1,96 @@
+schema = 3
+
+[driver]
+id = "elantp-327e"
+family = "elantp"
+name = "elantp"
+category = "touchpad"
+status = "alpha"
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Redox-openDriver/elantp-327e"
+keywords = ["touchpad", "ELAN", "04f3:327e", "ELAN06FA", "Precision Touchpad", "HID over I2C", "gestures", "libinput", "Lenovo", "ThinkBook", "Redox"]
+default_language = "ru"
+
+[tags]
+vendor = ["elan"]
+class = ["touchpad"]
+device = ["i2c:04f3:327e"]
+sensor = ["precision-touchpad", "clickpad", "5-contacts", "117x72-mm"]
+bus = ["i2c"]
+os = ["linux", "redox"]
+arch = ["x86_64"]
+libc = ["glibc"]
+init = ["systemd", "openrc", "runit", "dinit", "s6"]
+integration = ["libinput", "uinput", "acpi", "inputd"]
+desktop = ["kde", "gnome"]
+laptop = ["lenovo-thinkbook-16-g6-abp-21kk"]
+language = ["ru", "en"]
+
+[text.ru]
+title = "Открытый драйвер тачпада ELAN с жестами"
+summary = "Тачпад ELAN 04F3:327E для Redox и Linux: обычное управление из настроек рабочего стола и десятки своих жестов поверх."
+description = """
+elantp работает с тачпадом ELAN 04F3:327E (Windows Precision Touchpad на шине I2C, пять касаний).
+На Linux он отдаёт тачпад системе через виртуальный тачпад, поэтому скорость, тапы и прокрутку по-прежнему настраивают GNOME, KDE и другие окружения, а свои жесты работают поверх.
+Жесты — рейки громкости и яркости, углы, нарисованные символы, цифровой блок, джойстик и другие — включаются по одному в файле настроек.
+Для Redox есть своя служба с контроллером I2C, прерываниями GPIO и событиями в inputd; на ноутбуке она ещё не проверена.
+"""
+disclaimer = "Независимый открытый проект. Не связан с ELAN Microelectronics; название ELAN указано только для обозначения совместимого устройства."
+features = [
+  "на Linux — родные настройки GNOME, KDE и любых окружений на libinput",
+  "без файла настроек служба тачпад не трогает",
+  "рейки у краёв: громкость и яркость двумя руками, прокрутка вдоль края",
+  "углы: двойное касание выключает тачпад, удержание включает цифровой блок",
+  "нарисованные символы и выученные свои",
+  "джойстик в углу, клик задержкой, сглаживание дрожания, режим планшета",
+  "systemd, OpenRC, runit, dinit, s6; служба без привилегий в песочнице",
+  "работает только с проверенным вариантом тачпада",
+]
+
+[text.en]
+title = "Open driver for the ELAN touchpad, with gestures"
+summary = "The ELAN 04F3:327E touchpad on Redox and Linux: the usual control from the desktop settings, and dozens of gestures of its own on top."
+description = """
+elantp drives the ELAN 04F3:327E touchpad (a Windows Precision Touchpad on I2C, five contacts).
+On Linux it hands the pad to the system as a virtual touchpad, so GNOME, KDE and other desktops still set the speed, tapping and scrolling, and its own gestures work on top.
+The gestures — volume and brightness rails, corners, drawn symbols, a numpad, a joystick and more — are turned on one by one in a settings file.
+For Redox there is a service of its own with the I2C controller, GPIO interrupts and events for inputd; it has not run on the laptop yet.
+"""
+disclaimer = "An independent open project. Not affiliated with ELAN Microelectronics; the ELAN name only identifies the compatible device."
+features = [
+  "on Linux — the native settings of GNOME, KDE and any libinput desktop",
+  "without a settings file the service leaves the touchpad alone",
+  "edge rails: volume and brightness with two hands, scrolling along an edge",
+  "corners: a double tap turns the touchpad off, a hold turns on the numpad",
+  "drawn symbols, including ones you teach it",
+  "a joystick corner, dwell click, tremor smoothing, a tablet mode",
+  "systemd, OpenRC, runit, dinit, s6; an unprivileged sandboxed service",
+  "works only with the verified touchpad variant",
+]
+
+[[device]]
+bus = "i2c"
+vendor_id = "04f3"
+product_id = "327e"
+vendor = "ELAN Microelectronics"
+model = "ELAN06FA"
+kind = "Windows Precision Touchpad, clickpad 117x72 mm, 5 contacts"
+verified_firmware = ["0100"]
+laptops = ["Lenovo ThinkBook 16 G6 ABP (21KK)"]
+
+[platform.linux]
+status = "alpha"
+components = ["elantpd", "elantp-dev"]
+requirements = ["hid-multitouch", "uinput", "a libinput desktop for the native settings"]
+
+[platform.redox]
+status = "research"
+components = ["elantpd"]
+requirements = ["acpid", "inputd"]
+
+[links]
+readme = "README.md"
+security = "SECURITY.md"
+roadmap = "ROADMAP.md"
+messages = "https://github.com/Redox-openDriver/drv-i18n"

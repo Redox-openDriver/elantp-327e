@@ -1,3 +1,6 @@
 target/
 captures/
+images/
+refs/
 *.tprec
+*.raw
