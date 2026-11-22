@@ -32,7 +32,13 @@ language() {
 text() {
   messages_key=$1
   shift
-  ELANTP_TEXT_ARGS=$(printf '%s\n' "$@") awk -v key="$messages_key" '
+  messages_args=
+  for messages_pair in "$@"; do
+    messages_clean=$(printf '%s' "$messages_pair" | LC_ALL=C tr -d '\000-\037\177' | LC_ALL=C awk '{ gsub(/\302[\200-\237]|\342\200[\252-\256]|\342\201[\246-\251]/, ""); printf "%s", $0 }')
+    messages_args="$messages_args$messages_clean
+"
+  done
+  ELANTP_TEXT_ARGS=$messages_args awk -v key="$messages_key" '
     BEGIN {
       count = split(ENVIRON["ELANTP_TEXT_ARGS"], pairs, "\n")
       for (i = 1; i <= count; i++) {
