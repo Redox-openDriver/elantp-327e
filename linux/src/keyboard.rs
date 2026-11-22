@@ -1,104 +1,57 @@
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::os::fd::RawFd;
+use std::path::PathBuf;
 
 use crate::evdev::bit;
+use crate::watch::{self, Watched};
 
-const SYSFS: &str = "/sys/class/input";
 const EV_KEY: usize = 1;
-const EVENT: usize = 24;
-const BATCH: usize = 64;
 const LETTERS: [usize; 3] = [30, 44, 57];
 const MODIFIERS: [u16; 9] = [29, 97, 42, 54, 56, 100, 125, 126, 464];
-const OURS: &str = "elantp";
 
 pub fn is_keyboard(events: &str, keys: &str) -> bool {
     bit(events, EV_KEY) && LETTERS.iter().all(|key| bit(keys, *key))
 }
 
 pub fn find() -> io::Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(SYSFS)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str().filter(|name| name.starts_with("event")) else { continue };
-        let device = entry.path().join("device");
-        let read = |file: &str| std::fs::read_to_string(device.join(file)).unwrap_or_default();
-        if !read("name").trim().starts_with(OURS) && is_keyboard(&read("capabilities/ev"), &read("capabilities/key")) {
-            found.push(Path::new("/dev/input").join(name));
-        }
-    }
-    found.sort();
-    Ok(found)
+    watch::nodes(|device| is_keyboard(device.events, device.keys))
 }
 
 #[derive(Default)]
 pub struct Keyboards {
-    open: Vec<(PathBuf, File)>,
+    watched: Watched,
     held: BTreeSet<u16>,
 }
 
 impl Keyboards {
     pub fn refresh(&mut self) {
-        let Ok(nodes) = find() else { return };
-        self.open.retain(|(path, _)| nodes.contains(path));
-        for node in nodes {
-            if self.open.iter().any(|(path, _)| *path == node) {
-                continue;
-            }
-            if let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK).open(&node) {
-                self.open.push((node, file));
-            }
+        if let Ok(nodes) = find() {
+            self.watched.refresh(&nodes);
         }
     }
 
     pub fn clear(&mut self) {
-        self.open.clear();
+        self.watched.clear();
         self.held.clear();
     }
 
     pub fn count(&self) -> usize {
-        self.open.len()
+        self.watched.count()
     }
 
     pub fn fds(&self) -> Vec<RawFd> {
-        self.open.iter().map(|(_, file)| file.as_raw_fd()).collect()
+        self.watched.fds()
     }
 
     pub fn typed(&mut self) -> bool {
-        let mut typed = false;
-        let mut gone = Vec::new();
-        let mut buffer = [0u8; EVENT * BATCH];
-        for (index, (_, file)) in self.open.iter().enumerate() {
-            loop {
-                let count = unsafe { libc::read(file.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
-                if count <= 0 {
-                    let error = io::Error::last_os_error();
-                    if count < 0 && !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
-                        gone.push(index);
-                    }
-                    break;
-                }
-                let (events, _) = buffer[..count as usize].as_chunks::<EVENT>();
-                for event in events {
-                    typed |= press(&mut self.held, event);
-                }
-            }
-        }
-        for index in gone.into_iter().rev() {
-            self.open.remove(index);
-        }
+        let (held, mut typed) = (&mut self.held, false);
+        self.watched.events(|kind, code, value| typed |= press(held, kind, code, value));
         typed
     }
 }
 
-fn press(held: &mut BTreeSet<u16>, event: &[u8; EVENT]) -> bool {
-    let kind = u16::from_ne_bytes([event[16], event[17]]);
-    let code = u16::from_ne_bytes([event[18], event[19]]);
-    let value = i32::from_ne_bytes([event[20], event[21], event[22], event[23]]);
+fn press(held: &mut BTreeSet<u16>, kind: u16, code: u16, value: i32) -> bool {
     if usize::from(kind) != EV_KEY {
         return false;
     }
@@ -127,7 +80,6 @@ pub fn wait(fds: &[RawFd], timeout: std::time::Duration) -> io::Result<Vec<i16>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::uinput::event;
 
     #[test]
     fn keyboards_are_told_apart_from_buttons_touchpads_and_media_keys() {
@@ -143,13 +95,13 @@ mod tests {
     #[test]
     fn letters_count_as_typing_but_modifiers_and_shortcuts_do_not() {
         let mut held = BTreeSet::new();
-        assert!(press(&mut held, &event(1, 30, 1)));
-        assert!(!press(&mut held, &event(1, 30, 2)));
-        assert!(!press(&mut held, &event(1, 30, 0)));
-        assert!(!press(&mut held, &event(1, 29, 1)));
-        assert!(!press(&mut held, &event(1, 46, 1)));
-        assert!(!press(&mut held, &event(1, 29, 0)));
-        assert!(press(&mut held, &event(1, 46, 1)));
-        assert!(!press(&mut held, &event(2, 0, 5)));
+        assert!(press(&mut held, 1, 30, 1));
+        assert!(!press(&mut held, 1, 30, 2));
+        assert!(!press(&mut held, 1, 30, 0));
+        assert!(!press(&mut held, 1, 29, 1));
+        assert!(!press(&mut held, 1, 46, 1));
+        assert!(!press(&mut held, 1, 29, 0));
+        assert!(press(&mut held, 1, 46, 1));
+        assert!(!press(&mut held, 2, 0, 5));
     }
 }

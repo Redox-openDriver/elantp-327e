@@ -3,7 +3,7 @@ use std::io;
 use elantp_core::touchpad::{Axis, Frame, Layout};
 use gestus::{Button, Event, Surface, Touch};
 
-use crate::{keys, uinput};
+use crate::{hotkeys, keys, uinput};
 
 pub const SCROLL_PER_NOTCH: f32 = 30.0;
 
@@ -43,7 +43,10 @@ impl Devices {
     pub fn create(surface: Surface, tablet: bool) -> io::Result<Self> {
         let mut devices = Devices {
             pointer: uinput::Pointer::create("elantp gestus")?,
-            keyboard: uinput::Keyboard::create("elantp gestus keys", gestus::Key::ALL.iter().map(|key| keys::code(*key)))?,
+            keyboard: uinput::Keyboard::create(
+                "elantp gestus keys",
+                gestus::Key::ALL.iter().map(|key| keys::code(*key)).chain([hotkeys::ANNOUNCE_ON, hotkeys::ANNOUNCE_OFF]),
+            )?,
             pen: None,
             surface,
         };
@@ -80,6 +83,12 @@ impl Devices {
             other => return Ok(Some(other)),
         }
         Ok(None)
+    }
+
+    pub fn announce(&mut self, on: bool) -> io::Result<()> {
+        let code = hotkeys::announcement(on);
+        self.keyboard.key(code, true)?;
+        self.keyboard.key(code, false)
     }
 
     pub fn let_go(&mut self) -> io::Result<()> {

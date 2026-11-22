@@ -11,10 +11,11 @@ use elantp_linux::clone::Touchpad;
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::evdev::{self, Grab};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
+use elantp_linux::hotkeys::Switches;
 use elantp_linux::keyboard::{self, Keyboards};
 use elantp_linux::notices::{self, Notices};
 use elantp_linux::output::{Devices, surface, touches};
-use gestus::{Config, Event, Gestures, Input, Surface};
+use gestus::{Config, Event, Gestures, Input, Notice, Surface, Toggle};
 
 type BoxError = Box<dyn std::error::Error>;
 type Stamp = Option<(SystemTime, Option<SystemTime>)>;
@@ -74,6 +75,9 @@ impl Outputs {
                     say(catalog, &elantp_linux::notice(engine, notice));
                     if let Some(listeners) = listeners.as_mut() {
                         listeners.send(&notices::line(engine, notice));
+                    }
+                    if let Notice::Touchpad(on) = notice {
+                        self.devices.announce(on)?;
                     }
                 }
                 _ => {}
@@ -158,6 +162,11 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp, list
     let mut engine = build(loaded, surface);
     let mut keyboards = Keyboards::default();
     let mut listening = listen(catalog, &mut keyboards, &loaded.config);
+    let mut switches = Switches::default();
+    switches.refresh();
+    if switches.count() > 0 {
+        say(catalog, &Msg::new("service-switches").num("count", switches.count()));
+    }
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
     let started = Instant::now();
@@ -167,14 +176,24 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp, list
             break Outcome::Stopped;
         }
         let wait = engine.deadline().map_or(POLL, |at| Duration::from_millis(at.saturating_sub(micros(started)).div_ceil(1000)).min(POLL));
+        let typing = keyboards.fds();
         let mut fds = vec![pad.device.raw()];
-        fds.extend(keyboards.fds());
+        fds.extend(&typing);
+        fds.extend(switches.fds());
         let ready = keyboard::wait(&fds, wait)?;
         if ready[0] & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into());
         }
-        if ready[1..].iter().any(|events| *events != 0) && keyboards.typed() {
+        let (typed, switched) = ready[1..].split_at(typing.len());
+        if typed.iter().any(|events| *events != 0) && keyboards.typed() {
             engine.typed(micros(started));
+        }
+        if switched.iter().any(|events| *events != 0) {
+            for on in switches.pressed() {
+                let events = engine.switch(Toggle::Touchpad, on, micros(started));
+                outputs.deliver(catalog, &engine, events, listeners)?;
+                outputs.show(&engine)?;
+            }
         }
         if ready[0] & libc::POLLIN != 0 {
             while let Some(length) = pad.device.read(&mut buffer)? {
@@ -199,6 +218,7 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp, list
             if listening {
                 keyboards.refresh();
             }
+            switches.refresh();
             let fresh = config::stamp(path);
             if fresh != stamp {
                 stamp = fresh;

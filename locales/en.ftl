@@ -173,6 +173,7 @@ service-keyboards = watching for typing so that a typing palm is not taken for a
 service-keyboards-none = no keyboard found — a palm resting while typing may count as a cover
 service-notices = mode switches are announced through { $socket }
 service-notices-failed = could not open { $socket } for notices: { $detail } — mode switches show only in the log
+service-switches = the laptop's touchpad key turns the same switch as the gesture; heard from devices: { $count }
 service-error = error: { $detail }
 service-retry = trying again in { $seconds } s
 service-stopped = the service stopped, the system has the touchpad directly again

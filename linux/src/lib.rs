@@ -2,6 +2,7 @@ pub mod clone;
 pub mod config;
 pub mod evdev;
 pub mod hidraw;
+pub mod hotkeys;
 pub mod keyboard;
 pub mod keys;
 pub mod notices;
@@ -9,6 +10,7 @@ pub mod output;
 pub mod recording;
 pub mod session;
 pub mod uinput;
+pub mod watch;
 
 pub const LOCALES: [(&str, &str); 2] = [("ru", include_str!("../../locales/ru.ftl")), ("en", include_str!("../../locales/en.ftl"))];
 

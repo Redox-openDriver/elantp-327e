@@ -13,11 +13,12 @@ use elantp_core::report::ReportDescriptor;
 use elantp_core::touchpad::{Assembler, Axis, Frame, Layout, PadType};
 use elantp_linux::config::{self, Loaded};
 use elantp_linux::hidraw::{self, Device, Found, MAX_REPORT};
+use elantp_linux::hotkeys::Switches;
 use elantp_linux::keyboard::{self, Keyboards};
 use elantp_linux::output::{Devices, surface, touches};
 use elantp_linux::session::{self, Point, SCENARIOS, Scenario, Stats};
 use elantp_linux::{evdev, recording};
-use gestus::{Button, Event, Gestures, Input, Phase, Surface, Touch};
+use gestus::{Button, Event, Gestures, Input, Phase, Surface, Toggle, Touch};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -778,20 +779,31 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     let mut keyboards = Keyboards::default();
     let mut typing = loaded.config.uses_typing(false);
     watch_typing(catalog, &mut keyboards, &loaded);
+    let mut switches = Switches::default();
+    switches.refresh();
     let mut assembler = Assembler::default();
     let mut buffer = vec![0u8; MAX_REPORT];
     let started = Instant::now();
     let mut checked = Instant::now();
     while !STOP.load(Ordering::Relaxed) {
         let wait = engine.deadline().map_or(POLL, |at| Duration::from_millis(at.saturating_sub(micros(started)).div_ceil(1000)).min(POLL));
+        let typed_fds = keyboards.fds();
         let mut fds = vec![device.raw()];
-        fds.extend(keyboards.fds());
+        fds.extend(&typed_fds);
+        fds.extend(switches.fds());
         let ready = keyboard::wait(&fds, wait)?;
         if ready[0] & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             return Err(std::io::Error::from(ErrorKind::BrokenPipe).into());
         }
-        if ready[1..].iter().any(|events| *events != 0) && keyboards.typed() {
+        let (typed, switched) = ready[1..].split_at(typed_fds.len());
+        if typed.iter().any(|events| *events != 0) && keyboards.typed() {
             engine.typed(micros(started));
+        }
+        if switched.iter().any(|events| *events != 0) {
+            for on in switches.pressed() {
+                let events = engine.switch(Toggle::Touchpad, on, micros(started));
+                deliver(catalog, &mut outputs, &engine, events)?;
+            }
         }
         if ready[0] & libc::POLLIN != 0 {
             while let Some(length) = device.read(&mut buffer)? {
@@ -813,6 +825,7 @@ fn drive(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
             if typing {
                 keyboards.refresh();
             }
+            switches.refresh();
             let fresh = config::stamp(&path);
             if fresh != stamp {
                 stamp = fresh;
