@@ -227,7 +227,12 @@ fn serve(catalog: &Catalog, path: &Path, loaded: &Loaded, mut stamp: Stamp, list
                     Ok(loaded) => {
                         outputs.let_go()?;
                         outputs.devices.tablet(loaded.config.tablet.enabled)?;
+                        let kept = (!engine.locked(), engine.numpad(), engine.tablet());
                         engine = build(&loaded, surface);
+                        let now = micros(started);
+                        for (toggle, on) in [(Toggle::Touchpad, kept.0), (Toggle::Numpad, kept.1), (Toggle::Tablet, kept.2 && loaded.config.tablet.enabled)] {
+                            let _ = engine.switch(toggle, Some(on), now);
+                        }
                         listening = listen(catalog, &mut keyboards, &loaded.config);
                         outputs.show(&engine)?;
                         say(catalog, &Msg::new("service-reloaded").arg("file", path.display()));
