@@ -127,6 +127,7 @@ redox-pin-failed = GPIO pin { $pin } cannot be set up
 redox-irq-failed = interrupt { $irq } is unavailable: { $detail }
 redox-input-failed = no connection to inputd: { $detail }
 redox-read-failed = a touchpad report could not be read: { $detail }
+redox-retry = the touchpad is set up again in a second: { $detail }
 redox-started = the touchpad works: address { $address }, GPIO pin { $pin }, interrupt { $irq }
 dev-config-used = gesture settings: { $file }
 dev-config-default = { $file } does not exist — the new gestures are off, the usual set works

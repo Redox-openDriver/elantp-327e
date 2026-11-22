@@ -210,7 +210,9 @@ fn run(catalog: &Catalog) -> Result<(), BoxError> {
                 let mut now = TimeSpec::default();
                 timer.read(&mut now)?;
                 alarm.fired(desk.now());
-                pad.tick(desk.now()).map_err(|e| Fail::new("redox-pad-failed").arg("detail", format!("{e:?}")))?;
+                if let Err(e) = pad.tick(desk.now()) {
+                    say(catalog, &Msg::new("redox-retry").arg("detail", format!("{e:?}")));
+                }
                 desk.tick()?;
             }
             _ => {}

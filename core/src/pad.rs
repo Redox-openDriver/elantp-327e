@@ -68,19 +68,21 @@ impl<B: Bus> Pad<B> {
 
     pub fn tick(&mut self, now: u64) -> Result<(), PadError<B::Error>> {
         match self.state {
-            State::Resetting { since } if now.saturating_sub(since) >= RESET_PATIENCE => self.configure(),
+            State::Resetting { since } if now.saturating_sub(since) >= RESET_PATIENCE => {
+                self.configure().inspect_err(|_| self.state = State::Resetting { since: now })
+            }
             _ => Ok(()),
         }
     }
 
     pub fn interrupt(&mut self) -> Result<Option<Frame>, PadError<B::Error>> {
         self.bus.transfer(&[], &mut self.input).map_err(PadError::Bus)?;
-        let decoded = match i2c::input(&self.input) {
-            Input::Reset => None,
+        let (decoded, reset) = match i2c::input(&self.input) {
+            Input::Reset => (None, true),
             Input::Malformed(length) => return Err(PadError::Malformed(length)),
-            Input::Report(bytes) => Some(self.layout.decode(bytes)),
+            Input::Report(bytes) => (Some(self.layout.decode(bytes)), false),
         };
-        if matches!(self.state, State::Resetting { .. }) {
+        if reset || matches!(self.state, State::Resetting { .. }) {
             self.configure()?;
         }
         match decoded {
@@ -114,12 +116,16 @@ mod tests {
         product: u16,
         writes: Vec<Vec<u8>>,
         inputs: VecDeque<Vec<u8>>,
+        failing: bool,
     }
 
     impl Bus for Elan {
         type Error = ();
 
         fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), ()> {
+            if self.failing {
+                return Err(());
+            }
             match write {
                 [0x01, 0x00] => read.copy_from_slice(&hid_descriptor(self.product)),
                 [0x02, 0x00] => read.copy_from_slice(ELAN),
@@ -135,7 +141,7 @@ mod tests {
     }
 
     fn elan(inputs: Vec<Vec<u8>>) -> Elan {
-        Elan { product: 0x327e, writes: Vec::new(), inputs: inputs.into() }
+        Elan { product: 0x327e, writes: Vec::new(), inputs: inputs.into(), failing: false }
     }
 
     fn report(contacts: &[(u8, u16, u16)]) -> Vec<u8> {
@@ -174,6 +180,30 @@ mod tests {
         pad.tick(1_000_005).unwrap();
         assert_eq!(pad.state, State::Running);
         assert_eq!(pad.bus.writes.len(), 4);
+    }
+
+    #[test]
+    fn a_pad_that_reset_itself_while_running_is_switched_back_to_touchpad_mode() {
+        let mut pad = Pad::start(elan(vec![vec![0, 0], vec![0, 0], report(&[(1, 1000, 500)])]), 0x0001, 0).unwrap();
+        pad.interrupt().unwrap();
+        assert_eq!(pad.bus.writes.len(), 4);
+        assert_eq!(pad.interrupt().unwrap(), None);
+        assert_eq!(pad.bus.writes.len(), 6);
+        assert_eq!(pad.bus.writes[4], pad.bus.writes[2]);
+        assert_eq!(pad.bus.writes[5], pad.bus.writes[3]);
+        assert!(pad.interrupt().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_failed_configuration_is_tried_again_a_second_later_not_at_once() {
+        let mut pad = Pad::start(elan(vec![]), 0x0001, 0).unwrap();
+        pad.bus.failing = true;
+        assert!(pad.tick(1_000_000).is_err());
+        assert_eq!(pad.state, State::Resetting { since: 1_000_000 });
+        assert!(pad.tick(1_500_000).is_ok());
+        pad.bus.failing = false;
+        pad.tick(2_000_000).unwrap();
+        assert_eq!(pad.state, State::Running);
     }
 
     #[test]

@@ -127,6 +127,7 @@ redox-pin-failed = вывод GPIO { $pin } не настроить
 redox-irq-failed = прерывание { $irq } недоступно: { $detail }
 redox-input-failed = нет связи с inputd: { $detail }
 redox-read-failed = отчёт тачпада не прочитан: { $detail }
+redox-retry = тачпад будет настроен заново через секунду: { $detail }
 redox-started = тачпад работает: адрес { $address }, вывод GPIO { $pin }, прерывание { $irq }
 dev-config-used = настройки жестов: { $file }
 dev-config-default = файла { $file } нет — новые жесты выключены, работает обычный набор
