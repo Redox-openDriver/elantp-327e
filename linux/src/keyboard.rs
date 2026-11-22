@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use crate::evdev::bit;
 use crate::watch::{self, Watched};
 
+const EV_SYN: u16 = 0;
+const SYN_DROPPED: u16 = 3;
 const EV_KEY: usize = 1;
 const LETTERS: [usize; 3] = [30, 44, 57];
 const MODIFIERS: [u16; 9] = [29, 97, 42, 54, 56, 100, 125, 126, 464];
@@ -26,8 +28,10 @@ pub struct Keyboards {
 
 impl Keyboards {
     pub fn refresh(&mut self) {
-        if let Ok(nodes) = find() {
-            self.watched.refresh(&nodes);
+        if let Ok(nodes) = find()
+            && self.watched.refresh(&nodes)
+        {
+            self.held.clear();
         }
     }
 
@@ -46,12 +50,18 @@ impl Keyboards {
 
     pub fn typed(&mut self) -> bool {
         let (held, mut typed) = (&mut self.held, false);
-        self.watched.events(|kind, code, value| typed |= press(held, kind, code, value));
+        if self.watched.events(|kind, code, value| typed |= press(held, kind, code, value)) {
+            held.clear();
+        }
         typed
     }
 }
 
 fn press(held: &mut BTreeSet<u16>, kind: u16, code: u16, value: i32) -> bool {
+    if kind == EV_SYN && code == SYN_DROPPED {
+        held.clear();
+        return false;
+    }
     if usize::from(kind) != EV_KEY {
         return false;
     }
@@ -103,5 +113,8 @@ mod tests {
         assert!(!press(&mut held, 1, 29, 0));
         assert!(press(&mut held, 1, 46, 1));
         assert!(!press(&mut held, 2, 0, 5));
+        assert!(!press(&mut held, 1, 29, 1));
+        assert!(!press(&mut held, 0, 3, 0));
+        assert!(press(&mut held, 1, 46, 1), "events dropped by the kernel forget what was held");
     }
 }

@@ -39,8 +39,10 @@ pub struct Watched {
 }
 
 impl Watched {
-    pub fn refresh(&mut self, nodes: &[PathBuf]) {
+    pub fn refresh(&mut self, nodes: &[PathBuf]) -> bool {
+        let before = self.open.len();
         self.open.retain(|(path, _)| nodes.contains(path));
+        let lost = self.open.len() < before;
         for node in nodes {
             if self.open.iter().any(|(path, _)| path == node) {
                 continue;
@@ -49,6 +51,7 @@ impl Watched {
                 self.open.push((node.clone(), file));
             }
         }
+        lost
     }
 
     pub fn clear(&mut self) {
@@ -63,7 +66,7 @@ impl Watched {
         self.open.iter().map(|(_, file)| file.as_raw_fd()).collect()
     }
 
-    pub fn events(&mut self, mut each: impl FnMut(u16, u16, i32)) {
+    pub fn events(&mut self, mut each: impl FnMut(u16, u16, i32)) -> bool {
         let mut gone = Vec::new();
         let mut buffer = [0u8; EVENT * BATCH];
         for (index, (_, file)) in self.open.iter().enumerate() {
@@ -85,8 +88,10 @@ impl Watched {
                 }
             }
         }
+        let lost = !gone.is_empty();
         for index in gone.into_iter().rev() {
             self.open.remove(index);
         }
+        lost
     }
 }
