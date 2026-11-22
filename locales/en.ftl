@@ -146,6 +146,7 @@ dev-learn-saved = samples of “{ $name }” saved: { $count } → { $file }
 dev-learn-stopped = stopped, nothing saved
 dev-learn-bad-name = a symbol name is Latin letters, digits, “-” and “_”, up to 32 characters: “{ $value }”
 dev-learn-bad-times = “{ $value }” is not a sample count from 1 to 10
+dev-learn-shared = the elantp service holds the touchpad, so the pointer moves while you draw; to keep it still, stop the service first
 gesture-touchpad-off = touchpad off
 gesture-touchpad-on = touchpad on
 gesture-numpad-on = numpad on

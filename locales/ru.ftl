@@ -146,6 +146,7 @@ dev-learn-saved = сохранено образцов «{ $name }»: { $count } 
 dev-learn-stopped = остановлено, ничего не сохранено
 dev-learn-bad-name = имя символа — латиница, цифры, «-» и «_», до 32 знаков: «{ $value }»
 dev-learn-bad-times = «{ $value }» — не число образцов от 1 до 10
+dev-learn-shared = тачпад держит служба elantp, поэтому курсор будет двигаться, пока ты рисуешь; чтобы он стоял, сначала останови службу
 gesture-touchpad-off = тачпад выключен
 gesture-touchpad-on = тачпад включён
 gesture-numpad-on = цифровой блок включён

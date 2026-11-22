@@ -934,7 +934,14 @@ fn learn(catalog: &Catalog, options: &[&str]) -> Result<(), BoxError> {
     let layout = layout(&found.descriptor)?;
     let device = open(&found)?;
     let nodes = evdev::nodes(&evdev::hid_prefix(found.bus, found.vendor, found.product))?;
-    let grab = evdev::grab(&nodes).map_err(|e| Fail::new("dev-grab-failed").arg("detail", e))?;
+    let grab = match evdev::grab(&nodes) {
+        Ok(grab) => Some(grab),
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+            println!("{}", catalog.text("dev-learn-shared"));
+            None
+        }
+        Err(e) => return Err(Fail::new("dev-grab-failed").arg("detail", e).into()),
+    };
     catch_interrupt();
     println!("{}", catalog.render(&Msg::new("dev-learn-start").arg("name", &name).num("times", times).arg("file", target.display())));
     println!("{}", catalog.render(&Msg::new("dev-learn-draw").arg("name", &name).num("done", 0).num("times", times)));
