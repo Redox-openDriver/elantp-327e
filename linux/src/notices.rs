@@ -10,6 +10,7 @@ use gestus::{Gestures, Notice};
 pub const SOCKET: &str = "/run/elantp/notices";
 pub const MAX_LINE: usize = 128;
 const MOST_LISTENERS: usize = 16;
+const MOST_PER_USER: usize = 4;
 const SYMBOL: &str = "gesture-symbol";
 
 pub fn line(gestures: &Gestures, notice: Notice) -> String {
@@ -46,7 +47,7 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 pub struct Notices {
     path: PathBuf,
     listener: UnixListener,
-    listeners: Vec<UnixStream>,
+    listeners: Vec<(u32, UnixStream)>,
 }
 
 impl Notices {
@@ -67,14 +68,19 @@ impl Notices {
 
     pub fn send(&mut self, line: &str) {
         while let Ok((stream, _)) = self.listener.accept() {
-            if self.listeners.len() >= MOST_LISTENERS {
-                self.listeners.remove(0);
+            let Ok(uid) = peer_uid(&stream) else { continue };
+            if self.listeners.iter().filter(|(owner, _)| *owner == uid).count() >= MOST_PER_USER
+                && let Some(oldest) = self.listeners.iter().position(|(owner, _)| *owner == uid)
+            {
+                self.listeners.remove(oldest);
             }
-            self.listeners.push(stream);
+            if self.listeners.len() < MOST_LISTENERS {
+                self.listeners.push((uid, stream));
+            }
         }
         let bytes = format!("{line}\n").into_bytes();
         if bytes.len() <= MAX_LINE {
-            self.listeners.retain(|stream| sent(stream, &bytes));
+            self.listeners.retain(|(_, stream)| sent(stream, &bytes));
         }
     }
 }
@@ -153,7 +159,12 @@ mod tests {
         assert_eq!(notices.listeners.len(), 1);
         let crowd: Vec<UnixStream> = (0..MOST_LISTENERS + 2).map(|_| UnixStream::connect(&path).unwrap()).collect();
         notices.send("gesture-drawing");
-        assert_eq!(notices.listeners.len(), MOST_LISTENERS);
+        assert_eq!(notices.listeners.len(), MOST_PER_USER, "one user never takes the places of others");
+        let newest = crowd.last().unwrap();
+        newest.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut heard = String::new();
+        BufReader::new(newest).read_line(&mut heard).unwrap();
+        assert_eq!(heard, "gesture-drawing\n", "the newest of one user's listeners hears it");
         drop(crowd);
         drop(notices);
         assert!(!path.exists());
