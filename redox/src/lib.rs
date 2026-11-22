@@ -120,12 +120,22 @@ pub struct Mmio {
     words: usize,
 }
 
+const PAGE: usize = 4096;
+
+pub fn span(physical: usize, length: usize) -> (usize, usize, usize) {
+    let page = physical & !(PAGE - 1);
+    let skip = physical - page;
+    (page, skip, (skip + length).div_ceil(PAGE) * PAGE)
+}
+
 impl Mmio {
     pub fn map(physical: u32, length: u32) -> Result<Self, BoxError> {
         let protection = common::Prot { read: true, write: true };
-        let pointer = unsafe { common::physmap(physical as usize, length as usize, protection, common::MemoryType::Uncacheable) }
+        let (page, skip, mapped) = span(physical as usize, length as usize);
+        let pointer = unsafe { common::physmap(page, mapped, protection, common::MemoryType::Uncacheable) }
             .map_err(|e| Fail::new("redox-map-failed").arg("address", format!("{physical:#x}")).arg("detail", e))?;
-        Ok(Mmio { base: pointer.cast(), words: length as usize / 4 })
+        let base = unsafe { pointer.cast::<u8>().add(skip) }.cast::<u32>();
+        Ok(Mmio { base, words: length as usize / 4 })
     }
 }
 
