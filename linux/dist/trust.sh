@@ -15,7 +15,13 @@ root_process() {
 }
 
 trusted_dir() {
-  [ -n "$1" ] && [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ -n "$1" ] || return 1
+  if [ -L "$1" ]; then
+    [ "$(stat -c '%u' "$1" 2>/dev/null)" = 0 ] || return 1
+    trusted_dir "$(dirname "$1")" || return 1
+    set -- "$(readlink -f "$1")"
+  fi
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
   case $(stat -c '%u %a' "$1" 2>/dev/null) in
     '0 '*[2367]? | '0 '*[2367]) return 1 ;;
     '0 '*) return 0 ;;
